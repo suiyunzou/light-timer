@@ -40,6 +40,7 @@ static constexpr int TIMER_LONG_WIDTH = 152;
 static constexpr int TIMER_HEIGHT = 36;
 static constexpr DWORD CONTROLS_HOVER_MS = 400;
 static constexpr int PRESET_MINUTES[] = {5, 15, 25, 45};
+enum TimeView { CountdownView, StopwatchView, WallClockView };
 static const UINT TRAY = WM_APP + 1;
 static const ULONG_PTR PROTOCOL = 0x4C54494D;
 struct Hit {
@@ -59,7 +60,7 @@ struct Win {
 struct Settings {
   bool breath = true, sound = true, rest = false, pin = true, glass = true, music = false,
        personal = false;
-  int seconds = 1500, restSeconds = 3, personalTheme = 0, x = INT_MIN, y = INT_MIN;
+  int seconds = 1500, restSeconds = 3, personalTheme = 0, view = CountdownView, x = INT_MIN, y = INT_MIN;
   std::wstring path, musicFile;
   void load() {
     seconds =
@@ -71,6 +72,7 @@ struct Settings {
     music = GetPrivateProfileIntW(L"timer", L"music", 0, path.c_str());
     personal = GetPrivateProfileIntW(L"timer", L"personal", 0, path.c_str());
     personalTheme = std::clamp((int)GetPrivateProfileIntW(L"timer", L"personalTheme", 0, path.c_str()), 0, 2);
+    view = std::clamp((int)GetPrivateProfileIntW(L"timer", L"view", 0, path.c_str()), 0, 2);
     wchar_t file[32768]{};
     GetPrivateProfileStringW(L"timer", L"musicFile", L"", file, 32768, path.c_str());
     musicFile = file;
@@ -91,6 +93,7 @@ struct Settings {
                                                                {L"music", music},
                                                                {L"personal", personal},
                                                                {L"personalTheme", personalTheme},
+                                                               {L"view", view},
                                                                {L"rest", rest},
                                                                {L"pin", pin},
                                                                {L"glass", glass},
@@ -248,6 +251,8 @@ public:
   std::wstring tipTitle, tipDetail;
   Settings cfg;
   Countdown clock;
+  Stopwatch stopwatch;
+  int timerHover = 0;
   std::vector<std::unique_ptr<Win>> covers, orbs;
   bool dark = true, hover = false, keyMode = false, dragging = false, reduced = false,
        highContrast = false, test = false, editing = false, settingError = false,
@@ -264,6 +269,7 @@ public:
   bool musicPlaying = false, musicPreview = false, audioFailed = false;
   uint64_t settingsOpened = 0, restStarted = 0;
   HICON icon = nullptr, largeIcon = nullptr;
+  HBRUSH viewMenuBrush = nullptr;
   UINT scheduled = 0;
   bool transparentAllowed = true;
   App(HINSTANCE i, bool t) : instance(i), test(t) {
@@ -274,6 +280,8 @@ public:
     taskbarMessage = RegisterWindowMessageW(L"TaskbarCreated");
   }
   ~App() {
+    if (viewMenuBrush)
+      DeleteObject(viewMenuBrush);
     if (icon)
       DestroyIcon(icon);
     if (largeIcon)
@@ -384,8 +392,12 @@ public:
                        std::max((int)mi.rcWork.top, (int)(mi.rcWork.bottom - (r.bottom - r.top))));
     SetWindowPos(h, nullptr, x, y, 0, 0, SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
   }
+  bool longTime() const {
+    return cfg.view == CountdownView ? clock.duration >= 3600000
+           : cfg.view == StopwatchView && stopwatch.elapsed(nowMs()) >= 3600000;
+  }
   void resizeTimer() {
-    int width = (clock.duration >= 3600000 ? TIMER_LONG_WIDTH : TIMER_SHORT_WIDTH) * timer.dpi,
+    int width = (longTime() ? TIMER_LONG_WIDTH : TIMER_SHORT_WIDTH) * timer.dpi,
         height = TIMER_HEIGHT * timer.dpi;
     SetWindowPos(timer.h, windowPinned() ? HWND_TOPMOST : HWND_NOTOPMOST, 0, 0, width, height,
                  SWP_NOMOVE | SWP_NOACTIVATE);
@@ -454,6 +466,7 @@ public:
     tray();
     ShowWindow(timer.h, SW_SHOWNOACTIVATE);
     draw(timer);
+    schedule();
     return true;
   }
   bool controls() const {
@@ -486,6 +499,8 @@ public:
     return abs(p.x - timerPressPoint.x) >= dx || abs(p.y - timerPressPoint.y) >= dy;
   }
   void cancelTimerPointer() {
+    hideTip();
+    timerHover = 0;
     cancelHover();
     timerPointerDown = false;
     timerPressedId = 0;
@@ -499,15 +514,118 @@ public:
     return false;
   }
   std::wstring display() {
-    if (clock.completed)
-      return L"00:00";
-    auto secs = (clock.remaining(nowMs()) + 999) / 1000;
     wchar_t s[32];
-    if (clock.duration >= 3600000)
+    if (cfg.view == WallClockView) {
+      SYSTEMTIME local; GetLocalTime(&local);
+      swprintf(s, 32, L"%02u:%02u", local.wHour, local.wMinute);
+      return s;
+    }
+    if (cfg.view == CountdownView && clock.completed)
+      return L"00:00";
+    auto secs = cfg.view == StopwatchView ? stopwatch.elapsed(nowMs()) / 1000
+                                         : (clock.remaining(nowMs()) + 999) / 1000;
+    if (longTime())
       swprintf(s, 32, L"%02llu:%02llu:%02llu", secs / 3600, secs / 60 % 60, secs % 60);
     else
       swprintf(s, 32, L"%02llu:%02llu", secs / 60, secs % 60);
     return s;
+  }
+  const wchar_t *viewName() const {
+    return cfg.view == CountdownView ? L"倒计时" : cfg.view == StopwatchView ? L"正向计时" : L"当前时间";
+  }
+  bool timerActionEnabled(int id) const {
+    if (cfg.view != StopwatchView) return true;
+    return id == 5 ? !stopwatch.running : id != 2 || stopwatch.elapsed(nowMs()) < Stopwatch::maximum;
+  }
+  std::wstring accessibleTime() {
+    if (cfg.view == WallClockView) return L"当前时间，" + display();
+    if (cfg.view == StopwatchView)
+      return std::wstring(stopwatch.running ? L"正向计时，已用 " : L"正向计时，已暂停 ") + display();
+    return clock.completed ? L"时间到，00:00" : std::wstring(clock.running ? L"剩余 " : L"已暂停 ") + display();
+  }
+  void setView(int view) {
+    if (view < CountdownView || view > WallClockView) return;
+    closeSettings();
+    cfg.view = view;
+    cfg.save();
+    timer.focus = 4;
+    resizeTimer();
+    advance();
+    notifyState();
+  }
+  HMENU viewMenu() {
+    HMENU m = CreatePopupMenu();
+    auto down = std::wstring(L"倒计时") + (clock.running ? L" · 运行中" : clock.completed ? L" · 时间到" : L" · 已暂停");
+    auto up = std::wstring(L"正向计时") + (stopwatch.running ? L" · 运行中" : stopwatch.frozen ? L" · 已暂停" : L" · 未开始");
+    AppendMenuW(m, MF_STRING, 130, down.c_str());
+    AppendMenuW(m, MF_STRING, 131, up.c_str());
+    AppendMenuW(m, MF_STRING, 132, L"当前时间");
+    CheckMenuRadioItem(m, 130, 132, 130 + cfg.view, MF_BYCOMMAND);
+    // Keep native menu navigation and text names, but paint the three choices ourselves.
+    for (UINT id = 130; id <= 132; ++id) {
+      MENUITEMINFOW item{sizeof(item)};
+      item.fMask = MIIM_FTYPE;
+      item.fType = MFT_OWNERDRAW | MFT_RADIOCHECK;
+      SetMenuItemInfoW(m, id, FALSE, &item);
+    }
+    Surface sample;
+    sample.prepare(1, 1);
+    Paint p(sample, 1, dark);
+    palette(p, true);
+    if (viewMenuBrush) DeleteObject(viewMenuBrush);
+    viewMenuBrush = CreateSolidBrush(RGB(p.bg.GetR(), p.bg.GetG(), p.bg.GetB()));
+    MENUINFO info{sizeof(info)};
+    info.fMask = MIM_BACKGROUND | MIM_STYLE;
+    info.hbrBack = viewMenuBrush;
+    info.dwStyle = MNS_NOCHECK;
+    SetMenuInfo(m, &info);
+    return m;
+  }
+  void drawViewMenu(const DRAWITEMSTRUCT &item) {
+    Surface surface;
+    if (!surface.prepare(item.rcItem.right - item.rcItem.left, item.rcItem.bottom - item.rcItem.top))
+      return;
+    {
+      Paint p(surface, timer.dpi, dark);
+      palette(p, true);
+      const float width = surface.w / timer.dpi, height = surface.h / timer.dpi;
+      p.g.Clear(Color(255, p.bg.GetR(), p.bg.GetG(), p.bg.GetB()));
+      const int view = item.itemID - 130;
+      const bool selected = view == cfg.view, hot = item.itemState & ODS_SELECTED;
+      Color ink = p.ink, muted = p.muted;
+      if (highContrast && hot) {
+        p.rounded(3, 2, width - 6, height - 4, 5, p.accent);
+        ink = muted = p.onAccent;
+      } else {
+        if (selected || hot) p.rounded(3, 2, width - 6, height - 4, 5, p.track);
+        if (hot) p.rounded(3.5f, 2.5f, width - 7, height - 5, 5, p.muted, true);
+      }
+      const wchar_t *name = view == CountdownView ? L"倒计时" : view == StopwatchView ? L"正向计时" : L"当前时间";
+      const wchar_t *status = view == CountdownView
+          ? (clock.running ? L"运行中" : clock.completed ? L"时间到" : L"已暂停")
+          : view == StopwatchView ? (stopwatch.running ? L"运行中" : stopwatch.frozen ? L"已暂停" : L"未开始")
+          : L"本地时间";
+      p.text(name, 12, 0, 76, height, 13, ink, false, 0);
+      p.text(status, 90, 0, width - 120, height, 11, muted, false, 2);
+      if (selected) {
+        p.line(width - 23, height / 2, width - 20, height / 2 + 3, ink, 1.4f);
+        p.line(width - 20, height / 2 + 3, width - 15, height / 2 - 3, ink, 1.4f);
+      }
+    }
+    BitBlt(item.hDC, item.rcItem.left, item.rcItem.top, surface.w, surface.h,
+           surface.dc, 0, 0, SRCCOPY);
+  }
+  void chooseView() {
+    hideTip();
+    HMENU m = viewMenu();
+    RECT r; GetWindowRect(timer.h, &r);
+    SetForegroundWindow(timer.h);
+    int id = TrackPopupMenu(m, TPM_RETURNCMD | TPM_RIGHTBUTTON, r.left, r.bottom + 2,
+                           0, timer.h, nullptr);
+    DestroyMenu(m);
+    PostMessageW(timer.h, WM_NULL, 0, 0);
+    if (id >= 130 && id <= 132) setView(id - 130);
+    else { draw(timer); schedule(); }
   }
   void hit(Win &w, int id, int x, int y, int ww, int hh, const wchar_t *name) {
     w.hits.push_back({id, {x, y, x + ww, y + hh}, name});
@@ -533,6 +651,33 @@ public:
       p.rounded(h->r.left - 2, h->r.top - 2, h->r.right - h->r.left + 4, h->r.bottom - h->r.top + 4,
                 5, p.accent, true);
   }
+  void palette(Paint &p, bool personalSurface) {
+    if (cfg.personal && personalSurface) {
+      // Personal themes color the entire surface; work keeps the neutral palette.
+      constexpr unsigned backgrounds[] = {0xDCECE0, 0xF4E2CF, 0xE8E0F3};
+      constexpr unsigned darkBackgrounds[] = {0x203B2F, 0x443222, 0x352A48};
+      constexpr unsigned accents[] = {0x29563E, 0x774722, 0x604183};
+      constexpr unsigned darkAccents[] = {0xBCE5C7, 0xF2D0A9, 0xDCC8F4};
+      auto i = cfg.personalTheme;
+      p.bg = rgb(dark ? darkBackgrounds[i] : backgrounds[i], 238);
+      p.ink = p.accent = rgb(dark ? darkAccents[i] : accents[i]);
+      p.muted = rgb(dark ? darkAccents[i] : accents[i], 220);
+      p.onAccent = rgb(dark ? darkBackgrounds[i] : 0xFFFFFF);
+      p.track = rgb(dark ? darkAccents[i] : accents[i], 23);
+      p.edge = rgb(dark ? darkAccents[i] : accents[i], 48);
+    }
+    if (highContrast) {
+      auto systemColor = [](int index) {
+        auto c = GetSysColor(index);
+        return Color(255, GetRValue(c), GetGValue(c), GetBValue(c));
+      };
+      p.ink = p.muted = systemColor(COLOR_WINDOWTEXT);
+      p.bg = systemColor(COLOR_WINDOW);
+      p.accent = systemColor(COLOR_HIGHLIGHT);
+      p.onAccent = systemColor(COLOR_HIGHLIGHTTEXT);
+      p.track = systemColor(COLOR_BTNFACE);
+    }
+  }
   void draw(Win &w) {
     if (!w.h || !IsWindowVisible(w.h))
       return;
@@ -543,31 +688,7 @@ public:
     w.hits.clear();
     {
       Paint p(w.surface, w.dpi, dark);
-      if (cfg.personal && w.kind < 2) {
-        // Personal themes color the entire surface; work keeps the neutral palette.
-        constexpr unsigned backgrounds[] = {0xDCECE0, 0xF4E2CF, 0xE8E0F3};
-        constexpr unsigned darkBackgrounds[] = {0x203B2F, 0x443222, 0x352A48};
-        constexpr unsigned accents[] = {0x29563E, 0x774722, 0x604183};
-        constexpr unsigned darkAccents[] = {0xBCE5C7, 0xF2D0A9, 0xDCC8F4};
-        auto i = cfg.personalTheme;
-        p.bg = rgb(dark ? darkBackgrounds[i] : backgrounds[i], 238);
-        p.ink = p.accent = rgb(dark ? darkAccents[i] : accents[i]);
-        p.muted = rgb(dark ? darkAccents[i] : accents[i], 220);
-        p.onAccent = rgb(dark ? darkBackgrounds[i] : 0xFFFFFF);
-        p.track = rgb(dark ? darkAccents[i] : accents[i], 23);
-        p.edge = rgb(dark ? darkAccents[i] : accents[i], 48);
-      }
-      if (highContrast) {
-        auto systemColor = [](int index) {
-          auto c = GetSysColor(index);
-          return Color(255, GetRValue(c), GetGValue(c), GetBValue(c));
-        };
-        p.ink = p.muted = systemColor(COLOR_WINDOWTEXT);
-        p.bg = systemColor(COLOR_WINDOW);
-        p.accent = systemColor(COLOR_HIGHLIGHT);
-        p.onAccent = systemColor(COLOR_HIGHLIGHTTEXT);
-        p.track = systemColor(COLOR_BTNFACE);
-      }
+      palette(p, w.kind < 2);
       float width = r.right / w.dpi, height = r.bottom / w.dpi;
       if (w.kind < 2 || w.kind == 4) {
         auto fill = p.bg;
@@ -578,34 +699,64 @@ public:
         p.rounded(.5f, .5f, width - 1, height - 1, radius, p.edge, true);
       }
       if (w.kind == 0) {
-        if (controls()) {
-          int x = (int)width / 2;
-          int toggleX = musicPlaying ? x - 36 : x - 30;
-          int gear = musicPlaying ? x : x + 30;
-          hit(w, 2, toggleX - 16, 2, 32, 32,
-              clock.completed ? L"重新开始"
-              : clock.running ? L"暂停"
-                              : L"继续");
-          hit(w, 1, gear - 16, 2, 32, 32, L"设置倒计时");
-          p.icon(1, gear, height / 2, p.ink);
-          p.icon(clock.completed ? 10 : clock.running ? 2 : 3, toggleX, height / 2, p.ink);
-        } else {
-          float size = !clock.completed && clock.duration >= 3600000 ? 28 : 32;
-          if (clock.completed && completionEmphasis && !reduced)
-            size *= 1.04f;
-          auto left = clock.remaining(nowMs());
-          if (cfg.breath && !reduced && !dragging && clock.running && left <= 5000) {
-            float wave = (1 - cosf(float(left % 1000) / 1000 * 6.283185f)) * .5f;
-            size *= 1 + .065f * wave;
+        const bool reveal = controls();
+        const bool buttons = reveal && cfg.view != WallClockView;
+        auto buttonFill = [&](int id, float x, float ww) {
+          if (timerPressedId == id || timerHover == id)
+            p.rounded(x, 4, ww, 28, 5, timerPressedId == id ? p.edge : p.track);
+        };
+        if (reveal) {
+          hit(w, 4, 2, 2, 28, 32, (std::wstring(L"切换时间显示，当前：") + viewName()).c_str());
+          buttonFill(4, 2, 28);
+          if (cfg.view == WallClockView) {
+            p.circle(14, 18, 6, p.muted, true, 1.3f);
+            p.line(14, 18, 14, 14, p.muted, 1.3f);
+            p.line(14, 18, 17, 20, p.muted, 1.3f);
+          } else {
+            int dy = cfg.view == CountdownView ? 1 : -1;
+            p.line(14, 18 - 6 * dy, 14, 18 + 6 * dy, p.muted, 1.4f);
+            p.line(10, 18 + 2 * dy, 14, 18 + 6 * dy, p.muted, 1.4f);
+            p.line(18, 18 + 2 * dy, 14, 18 + 6 * dy, p.muted, 1.4f);
           }
-          if (musicPlaying) size = std::min(size, 27.f);
-          p.text(display(), 0, 0, width - (musicPlaying ? 30 : 0), height, size, p.ink, true);
+          p.line(23, 17, 25, 19, p.muted, 1);
+          p.line(25, 19, 27, 17, p.muted, 1);
+        }
+        if (buttons) {
+          int cell = (int)(width - 32) / (musicPlaying ? 3 : 2);
+          int toggleX = 32 + cell / 2, otherX = 32 + cell + cell / 2;
+          bool up = cfg.view == StopwatchView;
+          bool running = up ? stopwatch.running : clock.running;
+          bool restart = !up && clock.completed;
+          hit(w, 2, 32, 2, cell, 32, !timerActionEnabled(2) ? L"已达上限，请归零" : restart ? L"重新开始" : running ? L"暂停"
+              : up && !stopwatch.frozen ? L"开始正向计时" : L"继续");
+          hit(w, up ? 5 : 1, 32 + cell, 2, cell, 32, up ? L"归零" : L"设置倒计时");
+          buttonFill(2, 32, cell);
+          if (!up || !running) buttonFill(up ? 5 : 1, 32 + cell, cell);
+          p.icon(up ? 10 : 1, otherX, height / 2,
+                 up && running ? Color(100, p.ink.GetR(), p.ink.GetG(), p.ink.GetB()) : p.ink);
+          p.icon(restart ? 10 : running ? 2 : 3, toggleX, height / 2,
+                 timerActionEnabled(2) ? p.ink : Color(100, p.ink.GetR(), p.ink.GetG(), p.ink.GetB()));
+        } else {
+          const auto text = display();
+          const float textX = reveal ? 30.f : 0.f;
+          const float available = width - (reveal ? 32 : 0) - (musicPlaying ? 26 : 0);
+          // Fit actual digit count without changing either window size.
+          float size = std::min(28.f, available / (text.size() * .56f));
+          float emphasis = 1;
+          if (cfg.view == CountdownView && clock.completed && completionEmphasis && !reduced)
+            emphasis = 1.04f;
+          auto left = clock.remaining(nowMs());
+          if (cfg.view == CountdownView && cfg.breath && !reduced && !dragging && clock.running && left <= 5000) {
+            float wave = (1 - cosf(float(left % 1000) / 1000 * 6.283185f)) * .5f;
+            emphasis = 1 + .035f * wave;
+          }
+          p.fittedTime(text, textX, 0, available, height, size, p.ink, emphasis);
         }
         if (musicPlaying) {
-          float x = controls() ? width / 2 + 36 : width - 18;
+          float x = buttons ? 32 + 2.5f * ((int)(width - 32) / 3) : width - 14;
           p.rounded(x-11, height/2-11, 22, 22, 5, p.track);
           p.rounded(x-4, height/2-4, 8, 8, 1, p.ink);
-          hit(w, 3, x-16, 2, 32, 32, L"停止音乐");
+          hit(w, 3, x-12, 2, 24, 32, L"停止音乐");
         }
         focusBorder(p, w);
       } else if (w.kind == 1) {
@@ -716,14 +867,30 @@ public:
   }
   void schedule() {
     KillTimer(timer.h, 1);
-    scheduled = clock.delay(nowMs(), IsWindowVisible(timer.h), controls(),
+    const auto now = nowMs();
+    const bool visible = IsWindowVisible(timer.h);
+    scheduled = clock.delay(now, visible && cfg.view == CountdownView, controls(),
                             cfg.breath && !reduced && !dragging);
+    auto sooner = [&](unsigned delay) {
+      if (delay && (!scheduled || delay < scheduled)) scheduled = delay;
+    };
+    if (stopwatch.running) {
+      auto elapsed = stopwatch.elapsed(now);
+      sooner((unsigned)std::max<uint64_t>(1, Stopwatch::maximum - elapsed));
+      if (visible && cfg.view == StopwatchView && !controls())
+        sooner((unsigned)(1000 - elapsed % 1000));
+    }
+    if (visible && cfg.view == WallClockView) {
+      SYSTEMTIME local; GetLocalTime(&local);
+      sooner(60000 - local.wSecond * 1000 - local.wMilliseconds);
+    }
     if (scheduled)
       SetTimer(timer.h, 1, scheduled, nullptr);
   }
   void advance() {
     ++wakes;
     auto now = nowMs();
+    stopwatch.advance(now);
     if (clock.advance(now)) {
       lastLatency = now - clock.deadline;
       ++completions;
@@ -733,12 +900,22 @@ public:
       if (cfg.rest)
         showRest();
       else {
+        // Surface a background completion so a silent floating reminder remains visible.
+        if (cfg.view != CountdownView) {
+          cfg.view = CountdownView;
+          cfg.save();
+          timer.focus = 4;
+          notifyState();
+        }
         if (!reduced && IsWindowVisible(timer.h) && !controls()) {
           completionEmphasis = true;
           SetTimer(timer.h, 7, 650, nullptr);
         }
       }
     }
+    RECT bounds; GetWindowRect(timer.h, &bounds);
+    if (bounds.right - bounds.left != (int)((longTime() ? TIMER_LONG_WIDTH : TIMER_SHORT_WIDTH) * timer.dpi))
+      resizeTimer();
     draw(timer);
     schedule();
   }
@@ -747,6 +924,8 @@ public:
       endRest();
     KillTimer(timer.h, 7);
     completionEmphasis = false;
+    stopwatch.pause(nowMs());
+    cfg.view = CountdownView;
     cfg.seconds = std::clamp(seconds, 1, 359999);
     cfg.save();
     settingsDirty = false;
@@ -757,10 +936,26 @@ public:
     schedule();
   }
   void toggle() {
+    if (cfg.view == WallClockView) return;
+    if (cfg.view == StopwatchView) {
+      if (!stopwatch.running && stopwatch.frozen == Stopwatch::maximum) return;
+      if (!stopwatch.running) {
+        advance();
+        if (clock.running) clock.toggle(nowMs());
+        if (restEnd) endRest();
+        cfg.view = StopwatchView;
+        cfg.save();
+      }
+      stopwatch.toggle(nowMs());
+      resizeTimer();
+      notifyState(); draw(timer); schedule();
+      return;
+    }
     if (clock.completed) {
       start(cfg.seconds);
       return;
     }
+    if (!clock.running) stopwatch.pause(nowMs());
     clock.toggle(nowMs());
     notifyState();
     draw(timer);
@@ -828,6 +1023,7 @@ public:
   void hideTip() {
     KillTimer(timer.h, 5);
     KillTimer(timer.h, 6);
+    KillTimer(timer.h, 9);
     if (tip.h)
       ShowWindow(tip.h, SW_HIDE);
   }
@@ -852,6 +1048,43 @@ public:
     SetWindowPos(tip.h, HWND_TOPMOST, r.left + (int)(18 * tip.dpi),
                  y, width, height, SWP_NOACTIVATE);
     shape(tip, width, height);
+    clamp(tip.h);
+    ShowWindow(tip.h, SW_SHOWNOACTIVATE);
+    draw(tip);
+  }
+  void updateTimerHover(POINT point) {
+    auto target = at(timer, point.x, point.y);
+    int id = target ? target->id : 0;
+    if (id == timerHover) return;
+    timerHover = id;
+    hideTip();
+    if (id) SetTimer(timer.h, 9, 650, nullptr);
+    draw(timer);
+  }
+  void showTimerTip() {
+    KillTimer(timer.h, 9);
+    if (timerPointerDown || dragging || !IsWindowVisible(timer.h)) return;
+    POINT point; GetCursorPos(&point);
+    if (WindowFromPoint(point) != timer.h) return;
+    ScreenToClient(timer.h, &point);
+    auto target = at(timer, point.x, point.y);
+    if (!target || target->id != timerHover) return;
+    tipTitle = target->name;
+    tipDetail = target->id == 4 ? L"选择倒计时、正向计时或当前时间"
+                : target->id == 5 && stopwatch.running ? L"请先暂停，再归零"
+                : target->id == 5 ? L"清除本轮已用时间"
+                : target->id == 2 && !stopwatch.running && cfg.view == StopwatchView && clock.running
+                    ? L"开始后将暂停倒计时" : L"点击执行；按住移动可拖动浮窗";
+    if (!tip.h) {
+      make(tip, 244, 46, timer.h);
+      SetWindowLongPtrW(tip.h, GWL_EXSTYLE,
+                       GetWindowLongPtrW(tip.h, GWL_EXSTYLE) | WS_EX_NOACTIVATE | WS_EX_TRANSPARENT);
+    }
+    tip.dpi = timer.dpi;
+    RECT r; GetWindowRect(timer.h, &r);
+    SetWindowPos(tip.h, HWND_TOPMOST, r.left, r.bottom + (int)(6 * tip.dpi),
+                 (int)(244 * tip.dpi), (int)(46 * tip.dpi), SWP_NOACTIVATE);
+    shape(tip, (int)(244 * tip.dpi), (int)(46 * tip.dpi));
     clamp(tip.h);
     ShowWindow(tip.h, SW_SHOWNOACTIVATE);
     draw(tip);
@@ -882,11 +1115,16 @@ public:
   void action(Win &w, int id) {
     hideTip();
     if (w.kind == 0) {
+      if (!timerActionEnabled(id)) return;
       if (id == 1)
         showSettings();
       if (id == 2)
         toggle();
       if (id == 3) { stopAudio(); draw(timer); }
+      if (id == 4) chooseView();
+      if (id == 5 && cfg.view == StopwatchView && !stopwatch.running) {
+        stopwatch.reset(); resizeTimer(); notifyState(); draw(timer); schedule();
+      }
       return;
     }
     if (id == 9) {
@@ -1133,6 +1371,7 @@ public:
     AppendMenuW(appearance, MF_STRING, 117, L"雾紫");
     CheckMenuRadioItem(appearance, 115, 117, 115 + cfg.personalTheme, MF_BYCOMMAND);
     AppendMenuW(m, MF_POPUP | (cfg.personal ? 0 : MF_GRAYED), (UINT_PTR)appearance, L"窗口外观");
+    AppendMenuW(m, MF_POPUP, (UINT_PTR)viewMenu(), (std::wstring(L"时间显示 · ") + viewName()).c_str());
     AppendMenuW(m, MF_SEPARATOR, 0, nullptr);
     AppendMenuW(m, MF_STRING, 107, L"退出");
     POINT p;
@@ -1141,6 +1380,7 @@ public:
     int id = TrackPopupMenu(m, TPM_RETURNCMD | TPM_RIGHTBUTTON, p.x, p.y, 0, timer.h, nullptr);
     DestroyMenu(m);
     PostMessageW(timer.h, WM_NULL, 0, 0);
+    if (id >= 130 && id <= 132) setView(id - 130);
     if (id == 113 || id == 114) {
       cfg.personal = id == 114;
       if (!cfg.personal) stopAudio();
@@ -1225,8 +1465,12 @@ public:
     if (!f)
       return;
     std::ostringstream s;
+    auto displayed = display();
     s << "{\"tipVisible\":" << (tip.h && IsWindowVisible(tip.h)) << ",\"pid\":" << GetCurrentProcessId() << ",\"running\":" << clock.running
       << ",\"completed\":" << clock.completed << ",\"remainingMs\":" << clock.remaining(nowMs())
+      << ",\"view\":" << cfg.view << ",\"elapsedMs\":" << stopwatch.elapsed(nowMs())
+      << ",\"stopwatchRunning\":" << stopwatch.running
+      << ",\"display\":\"" << std::string(displayed.begin(), displayed.end()) << "\""
       << ",\"completionEmphasis\":" << completionEmphasis
       << ",\"controls\":" << controls()
       << ",\"hoverArmed\":" << hoverArmed << ",\"pointerDown\":" << timerPointerDown
@@ -1275,6 +1519,13 @@ public:
       closeSettings();
     else if (op == L"toggle")
       toggle();
+    else if (op == L"view") {
+      int view; if (in >> view) setView(view);
+    }
+    else if (test && op == L"elapsed") {
+      uint64_t ms;
+      if (in >> ms) { stopwatch.pause(nowMs()); stopwatch.frozen = std::min(ms, Stopwatch::maximum); resizeTimer(); draw(timer); schedule(); }
+    }
     else if (op == L"start") {
       int sec = cfg.seconds;
       in >> sec;
@@ -1341,6 +1592,23 @@ public:
     if (!w)
       return DefWindowProcW(h, msg, wp, lp);
     switch (msg) {
+    case WM_MEASUREITEM: {
+      auto item = reinterpret_cast<MEASUREITEMSTRUCT *>(lp);
+      if (item && item->CtlType == ODT_MENU && item->itemID >= 130 && item->itemID <= 132) {
+        item->itemWidth = (UINT)lroundf(184 * timer.dpi);
+        item->itemHeight = (UINT)lroundf(36 * timer.dpi);
+        return TRUE;
+      }
+      break;
+    }
+    case WM_DRAWITEM: {
+      auto item = reinterpret_cast<DRAWITEMSTRUCT *>(lp);
+      if (item && item->CtlType == ODT_MENU && item->itemID >= 130 && item->itemID <= 132) {
+        drawViewMenu(*item);
+        return TRUE;
+      }
+      break;
+    }
     case WM_GETOBJECT:
       if ((LONG)lp == OBJID_CLIENT) {
         auto a = new Accessible(h);
@@ -1381,6 +1649,7 @@ public:
       return 0;
     case WM_TIMER:
       if (h == timer.h) {
+        if (wp == 9) showTimerTip();
         if (wp == 8) {
           auto now = nowMs();
           if (settingsOpened && now - settingsOpened >= 180) settingsOpened = 0;
@@ -1432,7 +1701,7 @@ public:
         return MA_NOACTIVATE;
       break;
     case WM_SETCURSOR:
-      if (w->kind == 1 && LOWORD(lp) == HTCLIENT) {
+      if (w->kind < 2 && LOWORD(lp) == HTCLIENT) {
         POINT pos;
         GetCursorPos(&pos);
         ScreenToClient(h, &pos);
@@ -1461,6 +1730,7 @@ public:
           }
         } else {
           armHover();
+          updateTimerHover({GET_X_LPARAM(lp), GET_Y_LPARAM(lp)});
         }
         return 0;
       }
@@ -1490,6 +1760,8 @@ public:
           hover = true;
           keyMode = false;
           draw(timer);
+          ScreenToClient(h, &p);
+          updateTimerHover(p);
           schedule();
         }
       }
@@ -1501,6 +1773,8 @@ public:
         draw(settings);
       }
       if (w->kind == 0) {
+        hideTip();
+        timerHover = 0;
         cancelHover();
         hover = false;
         draw(timer);
@@ -1509,7 +1783,8 @@ public:
       return 0;
     case WM_LBUTTONDOWN: {
       if (w->kind == 0) {
-        auto hit = (controls() || musicPlaying) ? at(*w, GET_X_LPARAM(lp), GET_Y_LPARAM(lp)) : nullptr;
+        auto hit = at(*w, GET_X_LPARAM(lp), GET_Y_LPARAM(lp));
+        hideTip();
         timerPressedId = hit ? hit->id : 0;
         // Preserve keyboard-revealed buttons through this pointer press.
         hover = controls();
@@ -1523,6 +1798,7 @@ public:
           w->focus = timerPressedId;
         SetForegroundWindow(h);
         SetFocus(h);
+        draw(timer);
         return 0;
       }
       keyMode = false;
@@ -1549,7 +1825,7 @@ public:
     case WM_LBUTTONUP:
       if (w->kind == 0 && timerPointerDown) {
         POINT p{GET_X_LPARAM(lp), GET_Y_LPARAM(lp)};
-        auto hit = (controls() || musicPlaying) ? at(*w, p.x, p.y) : nullptr;
+        auto hit = at(*w, p.x, p.y);
         ClientToScreen(h, &p);
         int id = hit && hit->id == timerPressedId && !pastDragThreshold(p) ? hit->id : 0;
         timerPointerDown = false;
@@ -1557,6 +1833,7 @@ public:
         ReleaseCapture();
         if (id)
           action(*w, id);
+        draw(timer);
         armHover();
         return 0;
       }
@@ -1685,9 +1962,19 @@ public:
       }
       if (wp == VK_TAB) {
         if (w->kind == 0) {
-          w->focus = w->focus == 1 ? 2 : musicPlaying && w->focus == 2 ? 3 : 1;
+          draw(*w);
+          std::vector<int> ids;
+          for (auto &hit : w->hits)
+            if (timerActionEnabled(hit.id)) ids.push_back(hit.id);
+          if (ids.empty()) return 0;
+          auto it = std::find(ids.begin(), ids.end(), w->focus);
+          int index = it == ids.end() ? -1 : (int)(it - ids.begin());
+          int delta = GetKeyState(VK_SHIFT) & 0x8000 ? -1 : 1;
+          w->focus = ids[(index + delta + (int)ids.size()) % ids.size()];
           draw(*w);
           schedule();
+          NotifyWinEvent(EVENT_OBJECT_FOCUS, h, OBJID_CLIENT,
+                         (LONG)(byId(*w, w->focus) - w->hits.data()) + 1);
         } else if (w->kind == 1) {
           std::vector<int> ids;
           for (auto &v : w->hits)
@@ -1705,11 +1992,8 @@ public:
       }
       if (wp == VK_RETURN || wp == VK_SPACE) {
         if (w->kind == 0) {
-          if (w->focus == 3 && musicPlaying) { stopAudio(); draw(timer); }
-          else if (wp == VK_RETURN && w->focus == 1)
-            showSettings();
-          else
-            toggle();
+          draw(*w);
+          action(*w, byId(*w, w->focus) ? w->focus : cfg.view == WallClockView ? 4 : 2);
         } else if (w->kind == 1) {
           action(*w, ((w->focus >= 10 && w->focus <= 12)) ? 50 : w->focus);
         }
@@ -1759,6 +2043,10 @@ public:
       settings.glass = backdrop(settings.h, windowGlass());
       draw(timer);
       draw(settings);
+      schedule();
+      return 0;
+    case WM_TIMECHANGE:
+      draw(timer);
       schedule();
       return 0;
     case WM_POWERBROADCAST:
@@ -1820,8 +2108,7 @@ HRESULT Accessible::get_accName(VARIANT v, BSTR *p) {
   std::wstring name =
       h ? h->name
       : hwnd == app->timer.h
-          ? (app->clock.completed ? L"时间到，00:00"
-                                  : (app->clock.running ? L"剩余 " : L"已暂停 ") + app->display())
+          ? app->accessibleTime()
           : L"轻计时设置";
   if (!h) name = (app->cfg.personal ? L"个人模式，" : L"工作模式，") + name;
   *p = SysAllocString(name.c_str());
@@ -1842,6 +2129,7 @@ HRESULT Accessible::get_accRole(VARIANT v, VARIANT *p) {
   auto h = accHit(hwnd, v);
   int id = h ? h->id : 0;
   p->lVal = !id                                              ? ROLE_SYSTEM_GROUPING
+            : hwnd == app->timer.h && id == 4               ? ROLE_SYSTEM_BUTTONMENU
             : (id >= 10 && id <= 12)              ? ROLE_SYSTEM_SPINBUTTON
             : (id >= 40 && id <= 43)                          ? ROLE_SYSTEM_RADIOBUTTON
                                                              : ROLE_SYSTEM_PUSHBUTTON;
@@ -1857,6 +2145,10 @@ HRESULT Accessible::get_accState(VARIANT v, VARIANT *p) {
     p->lVal |= STATE_SYSTEM_FOCUSED;
   if (h && app->selected(h->id))
     p->lVal |= STATE_SYSTEM_CHECKED;
+  if (hwnd == app->timer.h && h && !app->timerActionEnabled(h->id))
+    p->lVal |= STATE_SYSTEM_UNAVAILABLE;
+  if (hwnd == app->timer.h && h && h->id == 4)
+    p->lVal |= STATE_SYSTEM_HASPOPUP;
   return S_OK;
 }
 HRESULT Accessible::get_accFocus(VARIANT *p) {
@@ -1936,6 +2228,19 @@ HRESULT Accessible::put_accValue(VARIANT v, BSTR s) {
 }
 
 static int selftest() {
+  Stopwatch sw;
+  sw.toggle(100);
+  if (sw.elapsed(450) != 350) return 10;
+  sw.pause(450);
+  if (sw.elapsed(50000) != 350) return 11;
+  sw.toggle(50000);
+  if (sw.elapsed(50650) != 1000) return 12;
+  sw.reset();
+  if (sw.elapsed(50650) != 1000) return 13;
+  sw.advance(Stopwatch::maximum + 50000);
+  if (sw.running || sw.frozen != Stopwatch::maximum) return 14;
+  sw.reset();
+  if (sw.elapsed(999999999) != 0) return 15;
   Countdown c;
   c.start(10000, 500);
   if (c.remaining(5500) != 5000)

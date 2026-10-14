@@ -141,6 +141,22 @@ struct Paint {
     line(cx, cy - radius * .5f, cx, cy, c, 1.1f);
     line(cx, cy, cx + radius * .35f, cy + radius * .2f, c, 1.1f);
   }
+  void fittedTime(const std::wstring &s, float x, float y, float w, float h, float size, Color c,
+                  float emphasis = 1) {
+    StringFormat fmt;
+    fmt.SetAlignment(StringAlignmentCenter);
+    fmt.SetLineAlignment(StringAlignmentCenter);
+    fmt.SetFormatFlags(StringFormatFlagsNoWrap);
+    // Measure with the same GDI+ layout and padding that DrawString uses.
+    // An estimated character width clips digits on some DPI/font combinations.
+    Font probe(L"Consolas", size, FontStyleRegular, UnitPixel);
+    RectF bounds;
+    g.MeasureString(s.c_str(), (int)s.size(), &probe, PointF(0, 0), &fmt, &bounds);
+    if (bounds.Width > (w - 2) / 1.04f) size *= (w - 2) / (1.04f * bounds.Width);
+    Font font(L"Consolas", size * emphasis, FontStyleRegular, UnitPixel);
+    SolidBrush brush(c);
+    g.DrawString(s.c_str(), (int)s.size(), &font, RectF(x, y, w, h), &fmt, &brush);
+  }
   void icon(int id, float x, float y, Color c) {
     switch (id) {
     case 1:

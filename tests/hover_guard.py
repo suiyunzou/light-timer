@@ -7,6 +7,8 @@ import subprocess
 import sys
 import time
 from PIL import ImageGrab
+import comtypes
+import comtypes.client
 
 ROOT = Path(__file__).resolve().parents[1]
 OUT = ROOT / 'scratch/hover-guard'
@@ -64,7 +66,7 @@ def move(x, y):
 def target(id=2):
     s = state()
     r = s['rect']
-    return ((r[0] + r[2]) // 2 + round((30 if id == 1 else -30) * s['dpi']),
+    return (r[0] + round((95 if id == 1 else 14 if id == 4 else 53) * s['dpi']),
             r[1] + round(18 * s['dpi']))
 
 def outside():
@@ -138,7 +140,7 @@ try:
     cmd('close-settings')
     ok('settings opens only on release')
 
-    for id in (1, 2, 0):
+    for id in (1, 2, 4, 0):
         outside()
         xy = reveal(id) if id else target()
         if not id:
@@ -159,7 +161,7 @@ try:
         assert s['running'] and not s['settingsVisible']
         time.sleep(.48)
         assert state()['controls'], 'Dwell must restart after drag'
-    ok('drag from both buttons and digits cancels click and restarts dwell')
+    ok('drag from action buttons, mode selector and digits cancels click and restarts dwell')
 
     # Press before controls appear cannot become a click merely by waiting.
     outside()
@@ -195,6 +197,15 @@ try:
     button(False)
     u.SendMessageW(h, 0x100, 9, 0)
     assert state()['controls']
+    mod = comtypes.client.GetModule('oleacc.dll')
+    acc = C.POINTER(mod.IAccessible)()
+    getacc = C.oledll.oleacc.AccessibleObjectFromWindow
+    getacc.argtypes = [W.HWND, W.DWORD, C.POINTER(comtypes.GUID), C.POINTER(C.POINTER(mod.IAccessible))]
+    getacc(h, 0xfffffffc, C.byref(mod.IAccessible._iid_), C.byref(acc))
+    for _ in range(4):
+        if acc.accName(acc.accFocus) == '暂停': break
+        u.SendMessageW(h, 0x100, 9, 0)
+    assert acc.accName(acc.accFocus) == '暂停'
     u.SendMessageW(h, 0x100, 32, 0)
     assert not state()['running']
     u.SendMessageW(h, 0x100, 27, 0)

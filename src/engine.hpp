@@ -1,6 +1,22 @@
 #pragma once
 #include <cstdint>
 #include <algorithm>
+// Elapsed time includes sleep, just like Countdown. Pauses keep millisecond precision.
+struct Stopwatch {
+  static constexpr uint64_t maximum = 359999000; // Keep the existing two-digit hours layout.
+  uint64_t frozen = 0, started = 0;
+  bool running = false;
+  uint64_t elapsed(uint64_t now) const {
+    return std::min(maximum, frozen + (running && now >= started ? now - started : 0));
+  }
+  void pause(uint64_t now) { frozen = elapsed(now); running = false; }
+  void toggle(uint64_t now) {
+    if (running) pause(now);
+    else if (frozen < maximum) { started = now; running = true; }
+  }
+  void reset() { if (!running) frozen = started = 0; }
+  void advance(uint64_t now) { if (running && elapsed(now) == maximum) pause(now); }
+};
 struct Countdown {
   uint64_t duration = 1500000, deadline = 0, frozen = 1500000;
   bool running = false, completed = false;
