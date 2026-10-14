@@ -17,16 +17,9 @@ ptr=C.POINTER(mod.IAccessible)()
 f=C.oledll.oleacc.AccessibleObjectFromWindow;f.argtypes=[W.HWND,W.DWORD,C.POINTER(comtypes.GUID),C.POINTER(C.POINTER(mod.IAccessible))]
 f(sh,0xfffffffc,C.byref(mod.IAccessible._iid_),C.byref(ptr))
 count=ptr.accChildCount;names=[ptr.accName(i) for i in range(1,count+1)]
-assert '小时' in names and '到时提示音' not in names and '呼吸提醒，点击切换到全屏休息' in names
+assert '小时' in names and '到时提示音' not in names and not any('提醒' in n for n in names)
 hours=names.index('小时')+1
 ptr.accValue[hours]='1';assert ptr.accValue(hours)=='1'
 role=ptr.accRole(hours);assert role==52 # ROLE_SYSTEM_SPINBUTTON
-names_after=[]
-ptr.accDoDefaultAction(names.index('呼吸提醒，点击切换到全屏休息')+1)
-names_after=[ptr.accName(i) for i in range(1,ptr.accChildCount+1)]
-assert '休息时长，1到5秒' in names_after and '增加休息时长' in names_after
-rest_field=names_after.index('休息时长，1到5秒')+1
-assert ptr.accRole(rest_field)==52
-ptr.accValue[rest_field]='3';assert ptr.accValue(rest_field)=='3'
-(OUT/'accessibility.json').write_text(json.dumps(dict(children=names,rest_children=names_after,editable_hours=ptr.accValue(hours)),ensure_ascii=False,indent=2),'utf-8')
-cmd('rest 0');cmd('close-settings');print('PASS: MSAA child enumeration, names, roles, editable value, action and dynamic controls')
+(OUT/'accessibility.json').write_text(json.dumps(dict(children=names,editable_hours=ptr.accValue(hours)),ensure_ascii=False,indent=2),'utf-8')
+cmd('rest 0');cmd('close-settings');print('PASS: MSAA child enumeration, names, roles, editable value, and no retired reminder controls')

@@ -1,8 +1,10 @@
+#include <windows.h>
+#pragma code_page(65001)
 1 24 "app.manifest"
 101 ICON "../assets/app.ico"
 1 VERSIONINFO
-FILEVERSION 0,1,5,0
-PRODUCTVERSION 0,1,5,0
+FILEVERSION 0,2,0,0
+PRODUCTVERSION 0,2,0,0
 FILEOS 0x40004
 FILETYPE 0x1
 BEGIN
@@ -12,11 +14,22 @@ BEGIN
   BEGIN
    VALUE "FileDescription", "LightTimer - Native countdown\0"
    VALUE "ProductName", "LightTimer\0"
-   VALUE "FileVersion", "0.1.5\0"
+   VALUE "FileVersion", "0.2.0\0"
   END
  END
  BLOCK "VarFileInfo"
  BEGIN
   VALUE "Translation", 0x409, 1200
  END
+END
+
+102 DIALOGEX 0, 0, 172, 74
+STYLE DS_SETFONT | DS_MODALFRAME | WS_POPUP | WS_CAPTION | WS_SYSMENU
+CAPTION "全屏提醒时长"
+FONT 9, "Microsoft YaHei UI"
+BEGIN
+ LTEXT "显示时长", -1, 12, 15, 54, 12
+ COMBOBOX 1001, 74, 12, 84, 90, CBS_DROPDOWNLIST | WS_VSCROLL | WS_TABSTOP
+ DEFPUSHBUTTON "确定", IDOK, 52, 48, 50, 16
+ PUSHBUTTON "取消", IDCANCEL, 108, 48, 50, 16
 END

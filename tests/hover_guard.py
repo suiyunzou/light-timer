@@ -64,7 +64,7 @@ def move(x, y):
 def target(id=2):
     s = state()
     r = s['rect']
-    return ((r[0] + r[2]) // 2 + round((-30 if id == 1 else 30) * s['dpi']),
+    return ((r[0] + r[2]) // 2 + round((30 if id == 1 else -30) * s['dpi']),
             r[1] + round(18 * s['dpi']))
 
 def outside():

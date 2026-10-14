@@ -43,7 +43,6 @@ public:
   }
   bool ended(WPARAM reason, LPARAM id) const {
     return device && static_cast<MCIDEVICEID>(id) == device &&
-           (reason == MCI_NOTIFY_FAILURE ||
-            (reason == MCI_NOTIFY_SUCCESSFUL && status(MCI_STATUS_MODE) == MCI_MODE_STOP));
+           (reason == MCI_NOTIFY_FAILURE || reason == MCI_NOTIFY_SUCCESSFUL);
   }
 };

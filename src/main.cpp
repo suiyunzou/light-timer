@@ -57,17 +57,20 @@ struct Win {
   bool glass = false;
 };
 struct Settings {
-  bool breath = true, sound = true, rest = false, pin = true, glass = true, music = false;
-  int seconds = 1500, restSeconds = 4, x = INT_MIN, y = INT_MIN;
+  bool breath = true, sound = true, rest = false, pin = true, glass = true, music = false,
+       personal = false;
+  int seconds = 1500, restSeconds = 3, personalTheme = 0, x = INT_MIN, y = INT_MIN;
   std::wstring path, musicFile;
   void load() {
     seconds =
         std::clamp((int)GetPrivateProfileIntW(L"timer", L"seconds", 1500, path.c_str()), 1, 359999);
     restSeconds =
-        std::clamp((int)GetPrivateProfileIntW(L"timer", L"restSeconds", 4, path.c_str()), 1, 5);
+        std::clamp((int)GetPrivateProfileIntW(L"timer", L"restSeconds", 3, path.c_str()), 1, 5);
     breath = GetPrivateProfileIntW(L"timer", L"breath", 1, path.c_str());
     sound = GetPrivateProfileIntW(L"timer", L"sound", 1, path.c_str());
     music = GetPrivateProfileIntW(L"timer", L"music", 0, path.c_str());
+    personal = GetPrivateProfileIntW(L"timer", L"personal", 0, path.c_str());
+    personalTheme = std::clamp((int)GetPrivateProfileIntW(L"timer", L"personalTheme", 0, path.c_str()), 0, 2);
     wchar_t file[32768]{};
     GetPrivateProfileStringW(L"timer", L"musicFile", L"", file, 32768, path.c_str());
     musicFile = file;
@@ -86,6 +89,8 @@ struct Settings {
                                                                {L"breath", breath},
                                                                {L"sound", sound},
                                                                {L"music", music},
+                                                               {L"personal", personal},
+                                                               {L"personalTheme", personalTheme},
                                                                {L"rest", rest},
                                                                {L"pin", pin},
                                                                {L"glass", glass},
@@ -97,7 +102,20 @@ struct Settings {
     section += L"musicFile=" + musicFile;
     section.push_back(L'\0');
     section.push_back(L'\0');
-    WritePrivateProfileSectionW(L"timer", section.c_str(), path.c_str());
+    std::wstring text = L"[timer]\r\n";
+    for (size_t i=0; i+1<section.size(); ++i)
+      if (section[i]) text += section[i];
+      else text += L"\r\n";
+    // Preserve Unicode song paths, including characters outside the system code page.
+    auto temporary = path + L".tmp";
+    if (FILE *f = _wfopen(temporary.c_str(), L"wb")) {
+      const wchar_t bom = 0xFEFF;
+      bool ok = fwrite(&bom, sizeof(bom), 1, f) == 1 &&
+                fwrite(text.data(), sizeof(wchar_t), text.size(), f) == text.size();
+      ok = fclose(f) == 0 && ok;
+      if (ok) MoveFileExW(temporary.c_str(), path.c_str(), MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH);
+      else DeleteFileW(temporary.c_str());
+    }
   }
 };
 class App;
@@ -235,6 +253,8 @@ public:
        highContrast = false, test = false, editing = false, settingError = false,
        settingsDirty = false;
   int fields[3]{0, 25, 0};
+  int reelFrom[3]{}, reelDirection[3]{}, wheelRemainder = 0, wheelField = -1;
+  uint64_t reelStarted[3]{};
   uint64_t restEnd = 0, paints = 0, wakes = 0, completions = 0, lastLatency = 0;
   HWND previous = nullptr;
   UINT taskbarMessage;
@@ -242,8 +262,7 @@ public:
   std::vector<BYTE> soundData;
   FileAudio fileAudio;
   bool musicPlaying = false, musicPreview = false, audioFailed = false;
-  uint64_t settingsOpened = 0, musicChanged = 0, restStarted = 0;
-  float musicFrom = 0;
+  uint64_t settingsOpened = 0, restStarted = 0;
   HICON icon = nullptr, largeIcon = nullptr;
   UINT scheduled = 0;
   bool transparentAllowed = true;
@@ -297,6 +316,8 @@ public:
     SystemParametersInfoW(SPI_GETCLIENTAREAANIMATION, 0, &animation, 0);
     reduced = !animation;
   }
+  bool windowPinned() const { return !cfg.personal || cfg.pin; }
+  bool windowGlass() const { return cfg.personal && cfg.glass; }
   bool backdrop(HWND h, bool enable) {
     enable = enable && transparentAllowed && !highContrast;
     int type = enable ? 3 : 1;
@@ -318,7 +339,7 @@ public:
     return f && f(h, &data) && enable;
   }
   bool restBackdrop(HWND h) {
-    if (!cfg.glass || !transparentAllowed || highContrast)
+    if (!windowGlass() || !transparentAllowed || highContrast)
       return false;
     struct Accent {
       int state, flags;
@@ -340,7 +361,7 @@ public:
                              w.kind == 4   ? L"轻计时 · 提示"
                              : w.kind == 1   ? L"轻计时 · 设置"
                              : w.kind == 0 ? L"轻计时"
-                                           : L"轻计时 · 休息",
+                                           : L"轻计时 · 到时提醒",
                              WS_POPUP, 0, 0, width, height, owner, nullptr, instance, nullptr);
     w.h = h;
     w.dpi = dpiFor(h) / 96.f;
@@ -349,7 +370,7 @@ public:
   void shape(Win &w, int width, int height) {
     if (w.kind == 2)
       return;
-    int r = (int)(12 * w.dpi);
+    int r = (int)((w.kind < 2 ? (cfg.personal ? 18 : 8) : 9) * w.dpi);
     SetWindowRgn(w.h, CreateRoundRectRgn(0, 0, width + 1, height + 1, r * 2, r * 2), TRUE);
   }
   void clamp(HWND h) {
@@ -366,7 +387,7 @@ public:
   void resizeTimer() {
     int width = (clock.duration >= 3600000 ? TIMER_LONG_WIDTH : TIMER_SHORT_WIDTH) * timer.dpi,
         height = TIMER_HEIGHT * timer.dpi;
-    SetWindowPos(timer.h, cfg.pin ? HWND_TOPMOST : HWND_NOTOPMOST, 0, 0, width, height,
+    SetWindowPos(timer.h, windowPinned() ? HWND_TOPMOST : HWND_NOTOPMOST, 0, 0, width, height,
                  SWP_NOMOVE | SWP_NOACTIVATE);
     shape(timer, width, height);
     clamp(timer.h);
@@ -392,7 +413,7 @@ public:
     n.uFlags = NIF_ICON | NIF_TIP | NIF_MESSAGE;
     n.hIcon = icon;
     n.uCallbackMessage = TRAY;
-    wcscpy_s(n.szTip, L"轻计时");
+    wcscpy_s(n.szTip, cfg.personal ? L"轻计时 · 个人模式" : L"轻计时 · 工作模式");
     Shell_NotifyIconW(remove ? NIM_DELETE : NIM_ADD, &n);
   }
   bool init() {
@@ -416,9 +437,9 @@ public:
     fields[2] = cfg.seconds % 60;
     if (!make(timer, TIMER_SHORT_WIDTH, TIMER_HEIGHT))
       return false;
-    make(settings, 288, 204, timer.h);
-    timer.glass = backdrop(timer.h, cfg.glass);
-    settings.glass = backdrop(settings.h, cfg.glass);
+    make(settings, 288, 156, timer.h);
+    timer.glass = backdrop(timer.h, windowGlass());
+    settings.glass = backdrop(settings.h, windowGlass());
     resizeTimer();
     POINT pos{};
     GetCursorPos(&pos);
@@ -426,7 +447,7 @@ public:
     GetMonitorInfoW(MonitorFromPoint(pos, MONITOR_DEFAULTTONEAREST), &mi);
     int x = cfg.x == INT_MIN ? mi.rcWork.right - int((TIMER_SHORT_WIDTH + 24) * timer.dpi) : cfg.x,
         y = cfg.y == INT_MIN ? mi.rcWork.top + int(36 * timer.dpi) : cfg.y;
-    SetWindowPos(timer.h, cfg.pin ? HWND_TOPMOST : HWND_NOTOPMOST, x, y, 0, 0,
+    SetWindowPos(timer.h, windowPinned() ? HWND_TOPMOST : HWND_NOTOPMOST, x, y, 0, 0,
                  SWP_NOSIZE | SWP_NOACTIVATE);
     clamp(timer.h);
     setupIcon();
@@ -475,10 +496,7 @@ public:
   bool selected(int id) const {
     if (id >= 40 && id <= 43)
       return fields[0] * 3600 + fields[1] * 60 + fields[2] == PRESET_MINUTES[id - 40] * 60;
-    return id == 20               ? cfg.breath
-           : id == 21             ? cfg.sound
-           : id == 23             ? cfg.music
-                                  : false;
+    return false;
   }
   std::wstring display() {
     if (clock.completed)
@@ -508,19 +526,12 @@ public:
     return nullptr;
   }
   void focusBorder(Paint &p, Win &w) {
-    if (!keyMode || !w.focus || (w.kind == 1 && ((w.focus >= 10 && w.focus <= 12) || w.focus == 30)))
+    if (!keyMode || !w.focus || (w.kind == 1 && ((w.focus >= 10 && w.focus <= 12))))
       return;
     auto h = byId(w, w.focus);
     if (h)
       p.rounded(h->r.left - 2, h->r.top - 2, h->r.right - h->r.left + 4, h->r.bottom - h->r.top + 4,
                 5, p.accent, true);
-  }
-  float musicPosition() const {
-    if (reduced || !musicChanged)
-      return cfg.music ? 1.f : 0.f;
-    float t = std::min(1.f, float(nowMs() - musicChanged) / 180.f);
-    t = t * t * (3 - 2 * t);
-    return musicFrom + ((cfg.music ? 1.f : 0.f) - musicFrom) * t;
   }
   void draw(Win &w) {
     if (!w.h || !IsWindowVisible(w.h))
@@ -532,6 +543,20 @@ public:
     w.hits.clear();
     {
       Paint p(w.surface, w.dpi, dark);
+      if (cfg.personal && w.kind < 2) {
+        // Personal themes color the entire surface; work keeps the neutral palette.
+        constexpr unsigned backgrounds[] = {0xDCECE0, 0xF4E2CF, 0xE8E0F3};
+        constexpr unsigned darkBackgrounds[] = {0x203B2F, 0x443222, 0x352A48};
+        constexpr unsigned accents[] = {0x29563E, 0x774722, 0x604183};
+        constexpr unsigned darkAccents[] = {0xBCE5C7, 0xF2D0A9, 0xDCC8F4};
+        auto i = cfg.personalTheme;
+        p.bg = rgb(dark ? darkBackgrounds[i] : backgrounds[i], 238);
+        p.ink = p.accent = rgb(dark ? darkAccents[i] : accents[i]);
+        p.muted = rgb(dark ? darkAccents[i] : accents[i], 220);
+        p.onAccent = rgb(dark ? darkBackgrounds[i] : 0xFFFFFF);
+        p.track = rgb(dark ? darkAccents[i] : accents[i], 23);
+        p.edge = rgb(dark ? darkAccents[i] : accents[i], 48);
+      }
       if (highContrast) {
         auto systemColor = [](int index) {
           auto c = GetSysColor(index);
@@ -548,19 +573,22 @@ public:
         auto fill = p.bg;
         if (!w.glass || highContrast)
           fill = Color(255, p.bg.GetR(), p.bg.GetG(), p.bg.GetB());
-        p.rounded(.5f, .5f, width - 1, height - 1, 9, fill);
-        p.rounded(.5f, .5f, width - 1, height - 1, 9, p.edge, true);
+        float radius = w.kind < 2 ? (cfg.personal ? 18.f : 8.f) : 9.f;
+        p.rounded(.5f, .5f, width - 1, height - 1, radius, fill);
+        p.rounded(.5f, .5f, width - 1, height - 1, radius, p.edge, true);
       }
       if (w.kind == 0) {
         if (controls()) {
           int x = (int)width / 2;
-          hit(w, 1, x - 46, 2, 32, 32, L"设置倒计时");
-          hit(w, 2, x + 14, 2, 32, 32,
+          int toggleX = musicPlaying ? x - 36 : x - 30;
+          int gear = musicPlaying ? x : x + 30;
+          hit(w, 2, toggleX - 16, 2, 32, 32,
               clock.completed ? L"重新开始"
               : clock.running ? L"暂停"
                               : L"继续");
-          p.icon(1, x - 30, height / 2, p.ink);
-          p.icon(clock.completed ? 10 : clock.running ? 2 : 3, x + 30, height / 2, p.ink);
+          hit(w, 1, gear - 16, 2, 32, 32, L"设置倒计时");
+          p.icon(1, gear, height / 2, p.ink);
+          p.icon(clock.completed ? 10 : clock.running ? 2 : 3, toggleX, height / 2, p.ink);
         } else {
           float size = !clock.completed && clock.duration >= 3600000 ? 28 : 32;
           if (clock.completed && completionEmphasis && !reduced)
@@ -570,109 +598,85 @@ public:
             float wave = (1 - cosf(float(left % 1000) / 1000 * 6.283185f)) * .5f;
             size *= 1 + .065f * wave;
           }
-          p.text(display(), 0, 0, width, height, size, p.ink, true);
+          if (musicPlaying) size = std::min(size, 27.f);
+          p.text(display(), 0, 0, width - (musicPlaying ? 30 : 0), height, size, p.ink, true);
+        }
+        if (musicPlaying) {
+          float x = controls() ? width / 2 + 36 : width - 18;
+          p.rounded(x-11, height/2-11, 22, 22, 5, p.track);
+          p.rounded(x-4, height/2-4, 8, 8, 1, p.ink);
+          hit(w, 3, x-16, 2, 32, 32, L"停止音乐");
         }
         focusBorder(p, w);
       } else if (w.kind == 1) {
-        p.text(L"倒计时", 18, 10, 200, 24, 13, p.ink, false, 0);
+        p.text(L"倒计时", cfg.personal ? 94 : 18, 10, 100, 24, 13, p.ink, false,
+               cfg.personal ? 1 : 0);
         hit(w, 9, 249, 8, 28, 28, L"关闭设置");
         p.icon(9, 263, 22, p.muted);
+        p.rounded(12, 38, 264, 58, cfg.personal ? 14 : 8,
+                  cfg.personal && !highContrast ? rgb(0xFFFFFF, dark ? 15 : 115) : p.track);
         const wchar_t *labels[] = {L"时", L"分", L"秒"};
         for (int i = 0; i < 3; i++) {
           int x = 18 + i * 86;
           wchar_t num[8];
           swprintf(num, 8, L"%02d", fields[i]);
           bool active = w.focus == 10 + i && GetFocus() == w.h;
+          bool rolling = !reduced && reelStarted[i] && nowMs() - reelStarted[i] < reelDuration();
           if (active) {
-            p.rounded(x, 42, 76, 34, 4, p.track);
-            p.rounded(x, 42, 76, 34, 4, p.accent, true);
-            if (!editing)
-              p.rounded(x + 21, 46, 34, 26, 2, p.accent);
+            p.rounded(x + 10, 42, 56, 33, 5,
+                      Color(dark ? 30 : 18, p.accent.GetR(), p.accent.GetG(), p.accent.GetB()));
+            if (keyMode || highContrast)
+              p.rounded(x + 10, 42, 56, 33, 5, p.ink, true);
           }
-          p.text(num, x, 40, 76, 36, 25, active && !editing ? p.onAccent : p.ink, true);
-          // A static caret gives input feedback without a permanent blink timer.
+          if (rolling) {
+            float t = std::min(1.f, float(nowMs() - reelStarted[i]) / reelDuration());
+            float ease = 1.f - (1.f-t)*(1.f-t)*(1.f-t);
+            float offset = ease * 36.f;
+            wchar_t old[8]; swprintf(old, 8, L"%02d", reelFrom[i]);
+            auto clip = p.g.Save();
+            p.g.SetClip(RectF((float)x, 41, 76, 36));
+            // Downward wheel input increases the value; digits follow that direction.
+            p.text(old, x, 40 + reelDirection[i]*offset, 76, 36, 28,
+                   Color((int)(255*(1-ease)), p.ink.GetR(), p.ink.GetG(), p.ink.GetB()), true);
+            p.text(num, x, 40 - reelDirection[i]*(36-offset), 76, 36, 28,
+                   Color((int)(255*ease), p.ink.GetR(), p.ink.GetG(), p.ink.GetB()), true);
+            p.g.Restore(clip);
+          } else {
+            p.text(num, x, 40, 76, 36, 28, p.ink, true);
+          }
           if (active && editing)
-            p.line(x + 55, 48, x + 55, 70, p.accent, 1);
+            p.line(x + 59, 46, x + 59, 72, p.accent, 1);
           p.text(labels[i], x, 77, 76, 16, 10, p.muted);
-          p.line(x, 76, x + 76, 76, p.track, 1);
           hit(w, 10 + i, x, 40, 76, 53, i == 0 ? L"小时" : i == 1 ? L"分钟" : L"秒");
         }
+        for (float x : {99.f, 185.f}) {
+          p.circle(x, 54, 1.4f, p.muted);
+          p.circle(x, 65, 1.4f, p.muted);
+        }
         for (int i = 0; i < 4; i++) {
-          int x = 18 + i * 65;
+          int x = 18 + i * 51;
           bool on = selected(40 + i), down = pressedId == 40 + i;
           float inset = down ? 1.f : 0.f;
           Color fill = down ? p.accent
                             : on ? (highContrast ? p.accent : rgb(dark ? 0xFFFFFF : 0x000000, 45))
                                  : p.track;
-          p.rounded(x + inset, 103 + inset, 57 - 2 * inset, 24 - 2 * inset, 5, fill);
+          if (cfg.personal && on) fill = p.accent;
+          p.rounded(x + inset, 108 + inset, 45 - 2 * inset, 28 - 2 * inset, cfg.personal ? 14 : 5, fill);
           if (on || down)
-            p.rounded(x + inset, 103 + inset, 57 - 2 * inset, 24 - 2 * inset, 5, p.ink, true);
-          p.text(std::to_wstring(PRESET_MINUTES[i]) + L"分", x, 103 + inset, 57, 24, 11,
-                 down || (on && highContrast) ? p.onAccent : p.ink);
-          hit(w, 40 + i, x, 103, 57, 24, (std::to_wstring(PRESET_MINUTES[i]) + L"分钟").c_str());
+            p.rounded(x + inset, 108 + inset, 45 - 2 * inset, 28 - 2 * inset, cfg.personal ? 14 : 5, p.ink, true);
+          p.text(std::to_wstring(PRESET_MINUTES[i]) + L"分", x, 108 + inset, 45, 28, 11,
+                 down || (on && (highContrast || cfg.personal)) ? p.onAccent : p.ink);
+          hit(w, 40 + i, x, 104, 45, 36, (std::to_wstring(PRESET_MINUTES[i]) + L"分钟").c_str());
         }
-        p.line(18, 140, 270, 140, p.track, 1);
-        p.rounded(18, 154, 66, 28, 7,
-                  pressedId == 22 ? rgb(dark ? 0xFFFFFF : 0x000000, 60) : p.track);
-        p.icon(cfg.rest ? 13 : 12, 32, 168, p.ink);
-        p.text(cfg.rest ? L"全屏" : L"浮窗", 44, 154, 28, 28, 11, p.ink);
-        p.line(75, 165, 78, 168, p.muted, 1.2f);
-        p.line(78, 168, 75, 171, p.muted, 1.2f);
-        hit(w, 22, 18, 150, 66, 36, cfg.rest ? L"全屏休息，点击切换到浮窗提醒" : L"浮窗提醒，点击切换到全屏休息");
-        {
-          int x = 106, id = 23;
-          bool on = cfg.music || musicPlaying;
-          if (on || settingsHover == id || pressedId == id)
-            p.rounded(x - 14, 154, 28, 28, 7,
-                      pressedId == id ? rgb(dark ? 0xFFFFFF : 0x000000, 60) : p.track);
-          auto state = p.g.Save();
-          p.g.TranslateTransform((float)x, 168);
-          float scale = .8f;
-          if (id == 23 && !reduced)
-            scale += .08f * sinf(musicPosition() * 3.141593f);
-          p.g.ScaleTransform(scale, scale);
-          if (musicPlaying) {
-            p.rounded(-5, -7, 10, 10, 1, p.ink);
-            float phase = reduced ? 0.f : float(nowMs() % 2000) / 2000 * 6.283185f;
-            for (int bar = 0; bar < 3; ++bar) {
-              float amplitude = reduced ? 2.f : 1 + 3 * (.5f + .5f * sinf(phase * 2 + bar));
-              p.line(-6.f + bar * 6, 10-amplitude, -6.f + bar * 6, 10, p.ink, 2);
-            }
-          } else
-            p.icon(11, 0, 0, on ? p.ink : p.muted);
-          p.g.Restore(state);
-          hit(w, id, 90, 150, 30, 36, musicPlaying ? L"停止音乐" : cfg.musicFile.empty() ? L"选择并播放本地歌曲" : L"播放歌曲");
-        }
-        p.line(125, 166, 128, 169, p.muted, 1.3f);
-        p.line(128, 169, 131, 166, p.muted, 1.3f);
-        hit(w, 24, 120, 150, 20, 36, L"更换本地歌曲");
-        if (cfg.rest) {
-          bool active = w.focus == 30 && GetFocus() == w.h;
-          p.rounded(145, 154, 66, 28, 5, p.track);
-          if (active) {
-            p.rounded(145, 154, 66, 28, 5, p.accent, true);
-            p.rounded(150, 158, 18, 20, 3, p.accent);
-          }
-          p.text(std::to_wstring(cfg.restSeconds), 148, 156, 22, 24, 16,
-                 active ? p.onAccent : p.ink, true);
-          p.text(L"秒", 170, 156, 18, 24, 11, p.muted);
-          p.line(189, 158, 189, 178, p.edge, 1);
-          p.line(192, 168, 207, 168, p.edge, 1);
-          auto up = cfg.restSeconds < 5 ? p.ink : p.muted;
-          auto down = cfg.restSeconds > 1 ? p.ink : p.muted;
-          p.line(195, 164, 199, 160, up, 1.3f);
-          p.line(199, 160, 203, 164, up, 1.3f);
-          p.line(195, 172, 199, 176, down, 1.3f);
-          p.line(199, 176, 203, 172, down, 1.3f);
-          hit(w, 30, 145, 154, 44, 28, L"休息时长，1到5秒");
-          hit(w, 32, 189, 148, 22, 20, L"增加休息时长");
-          hit(w, 31, 189, 168, 22, 20, L"减少休息时长");
-        }
-        p.circle(252, 168, pressedId == 50 ? 14 : 16, p.accent);
-        p.icon(3, 252, 168, p.onAccent);
-        hit(w, 50, 234, 150, 36, 36, L"开始新的倒计时");
+        if (cfg.personal)
+          p.rounded(pressedId == 50 ? 236 : 234, pressedId == 50 ? 108 : 106,
+                    pressedId == 50 ? 32 : 36, pressedId == 50 ? 28 : 32, 16, p.accent);
+        else
+          p.circle(252, 122, pressedId == 50 ? 14 : 16, p.accent);
+        p.icon(3, 252, 122, p.onAccent);
+        hit(w, 50, 234, 104, 36, 36, L"开始新的倒计时");
         if (settingError)
-          p.text(L"至少 1 秒", 18, 194, 252, 20, 11, p.ink);
+          p.text(L"至少 1 秒", 18, 146, 252, 20, 11, p.ink);
         focusBorder(p, w);
       } else if (w.kind == 4) {
         p.text(tipTitle, 10, 4, 224, 20, 11, p.ink, false, 0);
@@ -724,11 +728,11 @@ public:
       lastLatency = now - clock.deadline;
       ++completions;
       notifyState();
+      bool played = cfg.personal && cfg.music && playMusic();
+      if (!played && cfg.sound) playTone();
       if (cfg.rest)
         showRest();
       else {
-        if (cfg.sound)
-          playTone();
         if (!reduced && IsWindowVisible(timer.h) && !controls()) {
           completionEmphasis = true;
           SetTimer(timer.h, 7, 650, nullptr);
@@ -741,8 +745,6 @@ public:
   void start(int seconds) {
     if (restEnd)
       endRest();
-    if (musicPlaying)
-      stopAudio();
     KillTimer(timer.h, 7);
     completionEmphasis = false;
     cfg.seconds = std::clamp(seconds, 1, 359999);
@@ -765,6 +767,7 @@ public:
     schedule();
   }
   void showSettings() {
+    resetReels();
     hideTip();
     settingsHover = pressedId = 0;
     fields[0] = cfg.seconds / 3600;
@@ -787,21 +790,34 @@ public:
     draw(settings);
   }
   void sizeSettings() {
-    int ww = 288 * settings.dpi, hh = 204 * settings.dpi;
+    int ww = 288 * settings.dpi, hh = 156 * settings.dpi;
     if (settingError)
       hh += 20 * settings.dpi;
     SetWindowPos(settings.h, HWND_TOPMOST, 0, 0, ww, hh, SWP_NOMOVE | SWP_NOACTIVATE);
     shape(settings, ww, hh);
     clamp(settings.h);
   }
-  void setRestSeconds(int value) {
-    cfg.restSeconds = std::clamp(value, 1, 5);
-    settingsDirty = true;
+  unsigned reelDuration() const { return cfg.personal ? 220 : 160; }
+  void resetReels() {
+    for (auto &start : reelStarted) start = 0;
+    wheelRemainder = 0;
+    wheelField = -1;
+  }
+  void adjustField(int index, int steps) {
+    int value = std::clamp(fields[index] + steps, 0, index == 0 ? 99 : 59);
+    if (value == fields[index]) return;
+    reelFrom[index] = fields[index];
+    reelDirection[index] = value > fields[index] ? 1 : -1;
+    fields[index] = value;
+    reelStarted[index] = reduced ? 0 : nowMs();
+    settings.focus = 10 + index;
+    editing = false;
+    if (settingError) { settingError = false; sizeSettings(); }
+    if (!reduced) SetTimer(timer.h, 8, 16, nullptr);
     draw(settings);
-    auto target = byId(settings, 30);
-    if (target)
-      NotifyWinEvent(EVENT_OBJECT_VALUECHANGE, settings.h, OBJID_CLIENT,
-                     (LONG)(target - settings.hits.data()) + 1);
+    auto target = byId(settings, 10 + index);
+    if (target) NotifyWinEvent(EVENT_OBJECT_VALUECHANGE, settings.h, OBJID_CLIENT,
+                              (LONG)(target - settings.hits.data()) + 1);
   }
   void flushSettings() {
     if (settingsDirty) {
@@ -815,28 +831,11 @@ public:
     if (tip.h)
       ShowWindow(tip.h, SW_HIDE);
   }
-  void showTip(int id, bool transient = false) {
+  void showTip(int id) {
     hideTip();
-    if (!IsWindowVisible(settings.h) || id < 20 || (id > 32 && id != 50))
-      return;
-    if (id == 20 || id == 21) {
-      bool on = selected(id);
-      tipTitle = std::wstring(id == 20 ? L"最后5秒呼吸" : L"到时声音") + (on ? L" · 已开启" : L" · 已关闭");
-      tipDetail = on ? L"点击关闭" : L"点击开启";
-    } else if (id == 22) {
-      tipTitle = cfg.rest ? L"全屏休息 " + std::to_wstring(cfg.restSeconds) + L"秒" : L"呼吸提醒";
-      tipDetail = cfg.rest ? L"点击切换为呼吸提醒" : L"最后5秒数字呼吸，点击切换全屏休息";
-    } else if (id == 23) {
-      tipTitle = audioFailed ? L"音乐无法播放" : musicPreview ? L"柔光 · 正在试听" : cfg.music ? L"休息音乐 · 已开启" : L"休息音乐 · 已关闭";
-      tipDetail = audioFailed ? L"请检查声音输出设备" : musicPreview ? L"再次点击关闭音乐并停止试听" : cfg.music ? L"仅全屏休息时播放，点击关闭" : L"点击开启并试听5秒";
-    } else if (id >= 30 && id <= 32 && cfg.rest) {
-      tipTitle = L"休息时长：" + std::to_wstring(cfg.restSeconds) + L"秒（1–5秒）";
-      tipDetail = id == 30 ? L"输入数字或使用键盘上下箭头" : id == 32 ? L"点击增加1秒" : L"点击减少1秒";
-    } else if (id == 50) {
-      tipTitle = L"开始倒计时";
-      tipDetail = L"快捷键：Enter";
-    } else
-      return;
+    if (!IsWindowVisible(settings.h) || id != 50) return;
+    tipTitle = L"开始倒计时";
+    tipDetail = L"快捷键：Enter";
     if (!tip.h) {
       make(tip, 244, 46, settings.h);
       SetWindowLongPtrW(tip.h, GWL_EXSTYLE,
@@ -846,20 +845,21 @@ public:
     RECT r;
     GetWindowRect(settings.h, &r);
     int width = (int)(244 * tip.dpi), height = (int)(46 * tip.dpi);
-    SetWindowPos(tip.h, HWND_TOPMOST, r.left + (int)(22 * tip.dpi),
-                 r.top + (int)(98 * tip.dpi), width, height, SWP_NOACTIVATE);
+    MONITORINFO mi{sizeof(mi)};
+    GetMonitorInfoW(MonitorFromWindow(settings.h, MONITOR_DEFAULTTONEAREST), &mi);
+    int y = r.bottom + (int)(6 * tip.dpi);
+    if (y + height > mi.rcWork.bottom) y = r.top - height - (int)(6 * tip.dpi);
+    SetWindowPos(tip.h, HWND_TOPMOST, r.left + (int)(18 * tip.dpi),
+                 y, width, height, SWP_NOACTIVATE);
     shape(tip, width, height);
     clamp(tip.h);
     ShowWindow(tip.h, SW_SHOWNOACTIVATE);
     draw(tip);
-    if (transient)
-      SetTimer(timer.h, 6, 1200, nullptr);
   }
   void closeSettings() {
+    resetReels();
     KillTimer(timer.h, 8);
-    settingsOpened = musicChanged = 0;
-    if (musicPreview)
-      stopAudio();
+    settingsOpened = 0;
     hideTip();
     settingsHover = pressedId = 0;
     if (GetCapture() == settings.h)
@@ -872,16 +872,21 @@ public:
     closeSettings();
     cancelTimerPointer();
     ShowWindow(timer.h, visible ? SW_HIDE : SW_SHOWNOACTIVATE);
-    if (!visible)
+    if (!visible) {
+      resizeTimer();
+      SetForegroundWindow(timer.h);
       draw(timer);
+    }
     schedule();
   }
   void action(Win &w, int id) {
+    hideTip();
     if (w.kind == 0) {
       if (id == 1)
         showSettings();
       if (id == 2)
         toggle();
+      if (id == 3) { stopAudio(); draw(timer); }
       return;
     }
     if (id == 9) {
@@ -889,44 +894,18 @@ public:
       return;
     }
     if (id >= 10 && id <= 12) {
+      resetReels();
       w.focus = id;
       editing = false;
       draw(w);
       return;
     }
     if (id >= 40 && id <= 43) {
+      resetReels();
       fields[0] = fields[2] = 0;
       fields[1] = PRESET_MINUTES[id - 40];
       settingError = false;
     }
-    if (id == 20)
-      cfg.breath = !cfg.breath;
-    if (id == 21)
-      cfg.sound = !cfg.sound;
-    if (id == 22) {
-      cfg.rest = !cfg.rest;
-      cfg.breath = !cfg.rest;
-    }
-    if (id == 23) {
-      musicFrom = musicPosition();
-      cfg.music = !cfg.music;
-      musicChanged = nowMs();
-      if (!reduced)
-        SetTimer(timer.h, 8, 16, nullptr);
-      if (!cfg.music && musicPreview)
-        stopAudio();
-      if (cfg.music)
-        playMusic(5, true);
-      if (audioFailed)
-        showTip(23, true);
-    }
-    if (id == 30) {
-      w.focus = 30;
-      draw(w);
-      return;
-    }
-    if (id == 31 || id == 32)
-      cfg.restSeconds = std::clamp(cfg.restSeconds + (id == 32 ? 1 : -1), 1, 5);
     if (id == 50) {
       int value = fields[0] * 3600 + fields[1] * 60 + fields[2];
       if (!value) {
@@ -939,27 +918,11 @@ public:
       start(value);
       return;
     }
-    if (id >= 20 && id <= 32) {
-      // Keep disk I/O out of button feedback. Save once on close, start, or exit.
-      settingsDirty = true;
-      draw(w);
-      NotifyWinEvent(EVENT_OBJECT_STATECHANGE, w.h, OBJID_CLIENT, CHILDID_SELF);
-      if ((id == 20 || id == 21 || id == 23) && keyMode)
-        showTip(id);
-      if (id == 22) {
-        showTip(22, true);
-        auto target = byId(w, 22);
-        if (target)
-          NotifyWinEvent(EVENT_OBJECT_NAMECHANGE, w.h, OBJID_CLIENT,
-                         (LONG)(target - w.hits.data()) + 1);
-      }
-      schedule();
-      return;
-    }
     sizeSettings();
     draw(w);
   }
-  void playTone() { // A tiny generated PCM chime; no media engine or permanent audio thread.
+  void playTone() { // Short notification, independent of the selected song.
+    if (musicPlaying) return;
     stopAudio();
     if (soundData.empty()) {
       const int count = 11025 / 2;
@@ -992,27 +955,50 @@ public:
   }
   void stopAudio() {
     KillTimer(timer.h, 4);
-    KillTimer(timer.h, 9);
+    fileAudio.close();
     PlaySoundW(nullptr, nullptr, 0);
     musicPlaying = musicPreview = false;
     soundData.clear();
     soundData.shrink_to_fit();
   }
-  bool playMusic(int seconds, bool preview = false) {
+  std::wstring songName() const {
+    if (cfg.musicFile.empty()) return L"未选择歌曲";
+    return cfg.musicFile.substr(cfg.musicFile.find_last_of(L"\\/") + 1);
+  }
+  void audioError() {
+    MessageBoxW(IsWindowVisible(settings.h) ? settings.h : timer.h,
+                L"无法播放这首歌曲。请检查文件是否仍在原位置，或选择可播放的 MP3 / WAV 文件。",
+                L"轻计时", MB_OK | MB_ICONINFORMATION);
+  }
+  bool playMusic(bool preview = false) {
+    if (!cfg.personal || cfg.musicFile.empty()) return false;
+    if (musicPlaying && !preview) return true;
     stopAudio();
-    soundData = relaxationWave(seconds);
-    audioFailed = !PlaySoundW((LPCWSTR)soundData.data(), nullptr,
-                             SND_MEMORY | SND_ASYNC | SND_NODEFAULT);
-    if (audioFailed) {
-      stopAudio();
-      return false;
-    }
+    audioFailed = !fileAudio.play(cfg.musicFile, timer.h);
+    if (audioFailed) return false;
     musicPlaying = true;
     musicPreview = preview;
-    SetTimer(timer.h, 4, seconds * 1000, nullptr);
-    if (preview && !reduced)
-      SetTimer(timer.h, 9, 80, nullptr);
+    draw(timer);
     return true;
+  }
+  void chooseMusic() {
+    hideTip();
+    wchar_t file[32768]{};
+    if (cfg.musicFile.size() < 32768) wcscpy(file, cfg.musicFile.c_str());
+    OPENFILENAMEW picker{sizeof(picker)};
+    picker.hwndOwner = IsWindowVisible(settings.h) ? settings.h : timer.h;
+    picker.lpstrFilter = L"音乐文件 (MP3 / WAV)\0*.mp3;*.wav\0MP3\0*.mp3\0WAV\0*.wav\0\0";
+    picker.lpstrFile = file;
+    picker.nMaxFile = 32768;
+    picker.lpstrTitle = L"选择个人模式的歌曲";
+    picker.Flags = OFN_FILEMUSTEXIST | OFN_PATHMUSTEXIST | OFN_NOCHANGEDIR | OFN_EXPLORER;
+    if (!GetOpenFileNameW(&picker)) return;
+    stopAudio();
+    cfg.musicFile = file;
+    cfg.music = true;
+    audioFailed = false;
+    cfg.save();
+    draw(timer);
   }
   static BOOL CALLBACK monitor(HMONITOR m, HDC, LPRECT, LPARAM l) {
     ((App *)l)->addCover(m);
@@ -1050,9 +1036,6 @@ public:
       return;
     previous = GetForegroundWindow();
     closeSettings();
-    bool played = cfg.music && playMusic(cfg.restSeconds);
-    if (!played && cfg.sound)
-      playTone();
     restStarted = nowMs();
     restEnd = restStarted + cfg.restSeconds * 1000;
     EnumDisplayMonitors(nullptr, nullptr, monitor, (LPARAM)this);
@@ -1062,8 +1045,6 @@ public:
     SetTimer(timer.h, 2, reduced ? 200 : 50, nullptr);
   }
   void endRest() {
-    if (musicPlaying)
-      stopAudio();
     UnregisterHotKey(timer.h, 1);
     KillTimer(timer.h, 2);
     restEnd = 0;
@@ -1078,19 +1059,80 @@ public:
     previous = nullptr;
     draw(timer);
   }
+  static INT_PTR CALLBACK reminderDialog(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
+    auto app = reinterpret_cast<App *>(GetWindowLongPtrW(h, DWLP_USER));
+    if (msg == WM_INITDIALOG) {
+      app = reinterpret_cast<App *>(lp);
+      SetWindowLongPtrW(h, DWLP_USER, lp);
+      for (int i = 1; i <= 5; ++i) {
+        auto label = std::to_wstring(i) + L" 秒";
+        SendDlgItemMessageW(h, 1001, CB_ADDSTRING, 0, (LPARAM)label.c_str());
+      }
+      SendDlgItemMessageW(h, 1001, CB_SETCURSEL, app->cfg.restSeconds - 1, 0);
+      RECT owner, dialog;
+      GetWindowRect(GetParent(h), &owner);
+      GetWindowRect(h, &dialog);
+      SetWindowPos(h, HWND_TOP, owner.left + (owner.right-owner.left-dialog.right+dialog.left)/2,
+                   owner.bottom + 8, 0, 0, SWP_NOSIZE);
+      app->clamp(h);
+      return TRUE;
+    }
+    if (msg == WM_COMMAND && app) {
+      if (LOWORD(wp) == IDOK) {
+        int choice = (int)SendDlgItemMessageW(h, 1001, CB_GETCURSEL, 0, 0);
+        if (choice < 0 || choice > 4) return TRUE;
+        app->cfg.restSeconds = choice + 1;
+        app->cfg.save();
+        EndDialog(h, IDOK);
+        return TRUE;
+      }
+      if (LOWORD(wp) == IDCANCEL) {
+        EndDialog(h, IDCANCEL);
+        return TRUE;
+      }
+    }
+    return FALSE;
+  }
   void menu() {
     HMENU m = CreatePopupMenu();
-    HMENU preferences = CreatePopupMenu();
-    AppendMenuW(preferences, MF_STRING, 101, L"倒计时…");
-    AppendMenuW(preferences, MF_STRING | (cfg.sound ? MF_CHECKED : 0), 108, L"到时提示音");
-    AppendMenuW(m, MF_POPUP, (UINT_PTR)preferences, L"设置");
-    AppendMenuW(m, MF_STRING | (clock.completed ? MF_GRAYED : 0), 102,
-                clock.running ? L"暂停" : L"继续");
-    AppendMenuW(m, MF_STRING, 103, L"重新开始");
-    AppendMenuW(m, MF_SEPARATOR, 0, nullptr);
-    AppendMenuW(m, MF_STRING | (cfg.pin ? MF_CHECKED : 0), 104, L"置顶");
-    AppendMenuW(m, MF_STRING | (cfg.glass ? MF_CHECKED : 0), 105, L"磨砂玻璃");
-    AppendMenuW(m, MF_STRING, 106, IsWindowVisible(timer.h) ? L"隐藏浮窗" : L"显示浮窗");
+    HMENU modes = CreatePopupMenu();
+    AppendMenuW(modes, MF_STRING, 113, L"工作");
+    AppendMenuW(modes, MF_STRING, 114, L"个人");
+    CheckMenuRadioItem(modes, 113, 114, cfg.personal ? 114 : 113, MF_BYCOMMAND);
+    AppendMenuW(m, MF_POPUP, (UINT_PTR)modes, cfg.personal ? L"使用模式 · 个人" : L"使用模式 · 工作");
+
+    HMENU sounds = CreatePopupMenu();
+    AppendMenuW(sounds, MF_STRING, 118, L"浮窗提醒");
+    AppendMenuW(sounds, MF_STRING, 119, L"全屏倒数");
+    CheckMenuRadioItem(sounds, 118, 119, cfg.rest ? 119 : 118, MF_BYCOMMAND);
+    auto duration = L"全屏时长：" + std::to_wstring(cfg.restSeconds) + L" 秒…";
+    AppendMenuW(sounds, MF_STRING | (cfg.rest ? 0 : MF_GRAYED), 120, duration.c_str());
+    AppendMenuW(sounds, MF_SEPARATOR, 0, nullptr);
+    AppendMenuW(sounds, MF_STRING | (cfg.sound ? MF_CHECKED : 0), 108, L"提示音");
+    AppendMenuW(sounds, MF_SEPARATOR, 0, nullptr);
+    std::wstring title = audioFailed ? L"歌曲无法播放，请重新选择" : songName();
+    // Ampersands in filenames are text, not menu keyboard accelerators.
+    for (size_t i=0; (i=title.find(L'&', i)) != std::wstring::npos; i+=2) title.insert(i, 1, L'&');
+    if (!cfg.personal) title = L"歌曲仅限个人模式";
+    AppendMenuW(sounds, MF_STRING | MF_GRAYED, 0, title.c_str());
+    AppendMenuW(sounds, MF_STRING | (cfg.personal ? 0 : MF_GRAYED), 109, L"选择歌曲…");
+    UINT songDisabled = (!cfg.personal || cfg.musicFile.empty()) ? MF_GRAYED : 0;
+    AppendMenuW(sounds, MF_STRING | songDisabled,
+                110, musicPlaying ? L"停止播放" : L"试听整首歌曲");
+    AppendMenuW(sounds, MF_STRING | songDisabled | (cfg.music ? MF_CHECKED : 0), 111, L"到时播放歌曲");
+    AppendMenuW(sounds, MF_STRING | songDisabled, 112, L"清除歌曲");
+    AppendMenuW(m, MF_POPUP, (UINT_PTR)sounds, L"提醒");
+
+    HMENU appearance = CreatePopupMenu();
+    AppendMenuW(appearance, MF_STRING | (windowPinned() ? MF_CHECKED : 0), 104, L"浮窗置顶");
+    AppendMenuW(appearance, MF_STRING | (windowGlass() ? MF_CHECKED : 0), 105, L"背景磨砂");
+    AppendMenuW(appearance, MF_SEPARATOR, 0, nullptr);
+    AppendMenuW(appearance, MF_STRING | MF_GRAYED, 0, L"个人配色");
+    AppendMenuW(appearance, MF_STRING, 115, L"雾绿");
+    AppendMenuW(appearance, MF_STRING, 116, L"暖杏");
+    AppendMenuW(appearance, MF_STRING, 117, L"雾紫");
+    CheckMenuRadioItem(appearance, 115, 117, 115 + cfg.personalTheme, MF_BYCOMMAND);
+    AppendMenuW(m, MF_POPUP | (cfg.personal ? 0 : MF_GRAYED), (UINT_PTR)appearance, L"窗口外观");
     AppendMenuW(m, MF_SEPARATOR, 0, nullptr);
     AppendMenuW(m, MF_STRING, 107, L"退出");
     POINT p;
@@ -1099,31 +1141,77 @@ public:
     int id = TrackPopupMenu(m, TPM_RETURNCMD | TPM_RIGHTBUTTON, p.x, p.y, 0, timer.h, nullptr);
     DestroyMenu(m);
     PostMessageW(timer.h, WM_NULL, 0, 0);
-    if (id == 101)
-      showSettings();
-    if (id == 102)
-      toggle();
-    if (id == 103)
-      start(cfg.seconds);
-    if (id == 104) {
+    if (id == 113 || id == 114) {
+      cfg.personal = id == 114;
+      if (!cfg.personal) stopAudio();
+      cfg.save();
+      hideTip();
+      timer.glass = backdrop(timer.h, windowGlass());
+      settings.glass = backdrop(settings.h, windowGlass());
+      resizeTimer();
+      RECT settingsRect;
+      GetClientRect(settings.h, &settingsRect);
+      shape(settings, settingsRect.right, settingsRect.bottom);
+      draw(timer);
+      draw(settings);
+      notifyState();
+      NotifyWinEvent(EVENT_OBJECT_NAMECHANGE, settings.h, OBJID_CLIENT, CHILDID_SELF);
+      NOTIFYICONDATAW n{sizeof(n)};
+      n.hWnd = timer.h; n.uID = 1; n.uFlags = NIF_TIP;
+      wcscpy_s(n.szTip, cfg.personal ? L"轻计时 · 个人模式" : L"轻计时 · 工作模式");
+      Shell_NotifyIconW(NIM_MODIFY, &n);
+    }
+    if (cfg.personal && id >= 115 && id <= 117) {
+      cfg.personalTheme = id - 115;
+      cfg.save();
+      draw(timer);
+      draw(settings);
+    }
+    if (cfg.personal && id == 104) {
       cfg.pin = !cfg.pin;
       resizeTimer();
       cfg.save();
     }
-    if (id == 105) {
+    if (cfg.personal && id == 105) {
       cfg.glass = !cfg.glass;
       cfg.save();
-      timer.glass = backdrop(timer.h, cfg.glass);
-      settings.glass = backdrop(settings.h, cfg.glass);
+      timer.glass = backdrop(timer.h, windowGlass());
+      settings.glass = backdrop(settings.h, windowGlass());
       draw(timer);
       draw(settings);
     }
-    if (id == 106) {
-      toggleVisibility();
+    if (id == 118 || id == 119) {
+      cfg.rest = id == 119;
+      cfg.breath = !cfg.rest;
+      cfg.save();
+      draw(timer);
+      schedule();
+    }
+    if (id == 120 && cfg.rest) {
+      hideTip();
+      DialogBoxParamW(instance, MAKEINTRESOURCEW(102), timer.h, reminderDialog, (LPARAM)this);
     }
     if (id == 108) {
       cfg.sound = !cfg.sound;
       cfg.save();
+    }
+    if (cfg.personal && id == 109) chooseMusic();
+    if (cfg.personal && id == 110) {
+      if (musicPlaying) stopAudio();
+      else if (cfg.personal && !playMusic(true)) audioError();
+      draw(timer);
+    }
+    if (cfg.personal && id == 111 && !cfg.musicFile.empty()) {
+      cfg.music = !cfg.music;
+      cfg.save();
+    }
+    if (cfg.personal && id == 112) {
+      stopAudio();
+      cfg.musicFile.clear();
+      cfg.music = false;
+      audioFailed = false;
+      cfg.save();
+      draw(timer);
     }
     if (id == 107)
       DestroyWindow(timer.h);
@@ -1146,7 +1234,10 @@ public:
       << ",\"settingsVisible\":" << (IsWindowVisible(settings.h) != 0)
       << ",\"restActive\":" << (restEnd != 0) << ",\"covers\":" << covers.size()
       << ",\"restSeconds\":" << cfg.restSeconds << ",\"breath\":" << cfg.breath
-      << ",\"sound\":" << cfg.sound
+      << ",\"sound\":" << cfg.sound << ",\"personal\":" << cfg.personal
+      << ",\"hasSong\":" << !cfg.musicFile.empty()
+      << ",\"audioPositionMs\":" << fileAudio.status(MCI_STATUS_POSITION)
+      << ",\"audioLengthMs\":" << fileAudio.status(MCI_STATUS_LENGTH)
       << ",\"music\":" << cfg.music << ",\"musicPlaying\":" << musicPlaying
       << ",\"musicPreview\":" << musicPreview << ",\"audioFailed\":" << audioFailed
       << ",\"reducedMotion\":" << reduced
@@ -1215,7 +1306,7 @@ public:
       int v = 0;
       in >> v;
       cfg.glass = v != 0;
-      timer.glass = backdrop(timer.h, cfg.glass);
+      timer.glass = backdrop(timer.h, windowGlass());
       draw(timer);
     } else if (test && op == L"cancel-rest")
       endRest();
@@ -1281,20 +1372,26 @@ public:
       EndPaint(h, &ps);
       return 0;
     }
+    case MM_MCINOTIFY:
+      if (fileAudio.ended(wp, lp)) {
+        audioFailed = wp == MCI_NOTIFY_FAILURE;
+        stopAudio();
+        draw(timer);
+      }
+      return 0;
     case WM_TIMER:
       if (h == timer.h) {
-        if (wp == 9) {
-          if (!musicPreview || reduced || !IsWindowVisible(settings.h))
-            KillTimer(h, 9);
-          draw(settings);
-        }
         if (wp == 8) {
           auto now = nowMs();
-          if (reduced || !IsWindowVisible(settings.h) ||
-              ((!settingsOpened || now - settingsOpened >= 180) &&
-               (!musicChanged || now - musicChanged >= 180))) {
+          if (settingsOpened && now - settingsOpened >= 180) settingsOpened = 0;
+          bool rolling = false;
+          for (auto &start : reelStarted) {
+            if (start && (reduced || now - start >= reelDuration())) start = 0;
+            rolling = rolling || start != 0;
+          }
+          if (reduced || !IsWindowVisible(settings.h) || (!settingsOpened && !rolling)) {
             KillTimer(h, 8);
-            settingsOpened = musicChanged = 0;
+            settingsOpened = 0;
           }
           draw(settings);
         }
@@ -1322,10 +1419,7 @@ public:
               draw(*o);
         }
         if (wp == 4) {
-          bool preview = musicPreview;
           stopAudio();
-          if (preview)
-            draw(settings);
         }
       }
       return 0;
@@ -1343,7 +1437,7 @@ public:
         GetCursorPos(&pos);
         ScreenToClient(h, &pos);
         auto target = at(*w, pos.x, pos.y);
-        SetCursor(LoadCursorW(nullptr, target && ((target->id >= 10 && target->id <= 12) || target->id == 30) ? IDC_IBEAM
+        SetCursor(LoadCursorW(nullptr, target && ((target->id >= 10 && target->id <= 12)) ? IDC_IBEAM
                                      : target ? IDC_HAND : IDC_ARROW));
         return TRUE;
       }
@@ -1415,7 +1509,7 @@ public:
       return 0;
     case WM_LBUTTONDOWN: {
       if (w->kind == 0) {
-        auto hit = controls() ? at(*w, GET_X_LPARAM(lp), GET_Y_LPARAM(lp)) : nullptr;
+        auto hit = (controls() || musicPlaying) ? at(*w, GET_X_LPARAM(lp), GET_Y_LPARAM(lp)) : nullptr;
         timerPressedId = hit ? hit->id : 0;
         // Preserve keyboard-revealed buttons through this pointer press.
         hover = controls();
@@ -1455,7 +1549,7 @@ public:
     case WM_LBUTTONUP:
       if (w->kind == 0 && timerPointerDown) {
         POINT p{GET_X_LPARAM(lp), GET_Y_LPARAM(lp)};
-        auto hit = controls() ? at(*w, p.x, p.y) : nullptr;
+        auto hit = (controls() || musicPlaying) ? at(*w, p.x, p.y) : nullptr;
         ClientToScreen(h, &p);
         int id = hit && hit->id == timerPressedId && !pastDragThreshold(p) ? hit->id : 0;
         timerPointerDown = false;
@@ -1521,13 +1615,27 @@ public:
       }
       schedule();
       return 0;
-    case WM_CHAR:
-      if (w->kind == 1 && w->focus == 30 && cfg.rest) {
-        if (wp >= L'1' && wp <= L'5')
-          setRestSeconds((int)(wp - L'0'));
+    case WM_MOUSEWHEEL: {
+      if (w->kind != 1) break;
+      POINT point{GET_X_LPARAM(lp), GET_Y_LPARAM(lp)};
+      ScreenToClient(h, &point);
+      auto target = at(*w, point.x, point.y);
+      if (!target || target->id < 10 || target->id > 12) {
+        wheelRemainder = 0; wheelField = -1;
         return 0;
       }
+      hideTip();
+      int index = target->id - 10;
+      if (wheelField != index) { wheelRemainder = 0; wheelField = index; }
+      wheelRemainder += GET_WHEEL_DELTA_WPARAM(wp);
+      int steps = wheelRemainder / WHEEL_DELTA;
+      wheelRemainder %= WHEEL_DELTA;
+      if (steps) adjustField(index, -steps);
+      return 0;
+    }
+    case WM_CHAR:
       if (w->kind == 1 && w->focus >= 10 && w->focus <= 12) {
+        resetReels();
         int &n = fields[w->focus - 10];
         if (wp >= L'0' && wp <= L'9') {
           if (!editing)
@@ -1547,11 +1655,8 @@ public:
       }
       return 0;
     case WM_KEYDOWN:
+      hideTip();
       keyMode = true;
-      if (w->kind == 1 && w->focus == 30 && cfg.rest && (wp == VK_UP || wp == VK_DOWN)) {
-        setRestSeconds(cfg.restSeconds + (wp == VK_UP ? 1 : -1));
-        return 0;
-      }
       if (w->kind == 1 && w->focus >= 10 && w->focus <= 12) {
         if (wp == L'A' && (GetKeyState(VK_CONTROL) & 0x8000)) {
           editing = false;
@@ -1559,6 +1664,7 @@ public:
           return 0;
         }
         if (wp == VK_DELETE) {
+          resetReels();
           fields[w->focus - 10] = 0;
           editing = true;
           draw(*w);
@@ -1579,7 +1685,7 @@ public:
       }
       if (wp == VK_TAB) {
         if (w->kind == 0) {
-          w->focus = w->focus == 1 ? 2 : 1;
+          w->focus = w->focus == 1 ? 2 : musicPlaying && w->focus == 2 ? 3 : 1;
           draw(*w);
           schedule();
         } else if (w->kind == 1) {
@@ -1592,7 +1698,6 @@ public:
           w->focus = ids[(at + delta + (int)ids.size()) % ids.size()];
           editing = false;
           draw(*w);
-          showTip(w->focus);
           NotifyWinEvent(EVENT_OBJECT_FOCUS, h, OBJID_CLIENT,
                          (LONG)((std::find(ids.begin(), ids.end(), w->focus) - ids.begin()) + 1));
         }
@@ -1600,19 +1705,18 @@ public:
       }
       if (wp == VK_RETURN || wp == VK_SPACE) {
         if (w->kind == 0) {
-          if (wp == VK_RETURN && w->focus == 1)
+          if (w->focus == 3 && musicPlaying) { stopAudio(); draw(timer); }
+          else if (wp == VK_RETURN && w->focus == 1)
             showSettings();
           else
             toggle();
         } else if (w->kind == 1) {
-          action(*w, ((w->focus >= 10 && w->focus <= 12) || w->focus == 30) ? 50 : w->focus);
+          action(*w, ((w->focus >= 10 && w->focus <= 12)) ? 50 : w->focus);
         }
         return 0;
       }
       if (w->kind == 1 && w->focus >= 10 && w->focus <= 12 && (wp == VK_UP || wp == VK_DOWN)) {
-        auto &n = fields[w->focus - 10];
-        n = std::clamp(n + (wp == VK_UP ? 1 : -1), 0, w->focus == 10 ? 99 : 59);
-        draw(*w);
+        adjustField(w->focus - 10, wp == VK_UP ? 1 : -1);
         return 0;
       }
       break;
@@ -1651,8 +1755,8 @@ public:
     case WM_SETTINGCHANGE:
     case WM_THEMECHANGED:
       theme();
-      timer.glass = backdrop(timer.h, cfg.glass);
-      settings.glass = backdrop(settings.h, cfg.glass);
+      timer.glass = backdrop(timer.h, windowGlass());
+      settings.glass = backdrop(settings.h, windowGlass());
       draw(timer);
       draw(settings);
       schedule();
@@ -1687,7 +1791,7 @@ public:
         KillTimer(h, 1);
         KillTimer(h, 2);
         endRest();
-        PlaySoundW(nullptr, nullptr, 0);
+        stopAudio();
         if (IsWindow(settings.h))
           DestroyWindow(settings.h);
         PostQuitMessage(0);
@@ -1719,6 +1823,7 @@ HRESULT Accessible::get_accName(VARIANT v, BSTR *p) {
           ? (app->clock.completed ? L"时间到，00:00"
                                   : (app->clock.running ? L"剩余 " : L"已暂停 ") + app->display())
           : L"轻计时设置";
+  if (!h) name = (app->cfg.personal ? L"个人模式，" : L"工作模式，") + name;
   *p = SysAllocString(name.c_str());
   return S_OK;
 }
@@ -1729,10 +1834,6 @@ HRESULT Accessible::get_accValue(VARIANT v, BSTR *p) {
     *p = SysAllocString(std::to_wstring(app->fields[h->id - 10]).c_str());
     return S_OK;
   }
-  if (hwnd == app->settings.h && h && h->id == 30) {
-    *p = SysAllocString(std::to_wstring(app->cfg.restSeconds).c_str());
-    return S_OK;
-  }
   return S_FALSE;
 }
 HRESULT Accessible::get_accRole(VARIANT v, VARIANT *p) {
@@ -1741,9 +1842,8 @@ HRESULT Accessible::get_accRole(VARIANT v, VARIANT *p) {
   auto h = accHit(hwnd, v);
   int id = h ? h->id : 0;
   p->lVal = !id                                              ? ROLE_SYSTEM_GROUPING
-            : (id >= 10 && id <= 12) || id == 30              ? ROLE_SYSTEM_SPINBUTTON
-            : id == 20 || id == 21 || id == 23               ? ROLE_SYSTEM_CHECKBUTTON
-            : id >= 40 && id <= 43                           ? ROLE_SYSTEM_RADIOBUTTON
+            : (id >= 10 && id <= 12)              ? ROLE_SYSTEM_SPINBUTTON
+            : (id >= 40 && id <= 43)                          ? ROLE_SYSTEM_RADIOBUTTON
                                                              : ROLE_SYSTEM_PUSHBUTTON;
   return S_OK;
 }
@@ -1781,8 +1881,6 @@ HRESULT Accessible::accSelect(long, VARIANT v) {
   app->keyMode = true;
   SetForegroundWindow(hwnd);
   app->draw(*w);
-  if (hwnd == app->settings.h)
-    app->showTip(w->focus);
   return S_OK;
 }
 HRESULT Accessible::accLocation(long *x, long *y, long *width, long *height, VARIANT v) {
@@ -1825,12 +1923,6 @@ HRESULT Accessible::accDoDefaultAction(VARIANT v) {
 }
 HRESULT Accessible::put_accValue(VARIANT v, BSTR s) {
   auto h = accHit(hwnd, v);
-  if (hwnd == app->settings.h && h && h->id == 30 && s) {
-    if (SysStringLen(s) != 1 || s[0] < L'1' || s[0] > L'5')
-      return E_INVALIDARG;
-    app->setRestSeconds(s[0] - L'0');
-    return S_OK;
-  }
   if (hwnd != app->settings.h || !h || h->id < 10 || h->id > 12 || !s)
     return E_INVALIDARG;
   wchar_t *end = nullptr;
@@ -1838,6 +1930,7 @@ HRESULT Accessible::put_accValue(VARIANT v, BSTR s) {
   if (!end || *end || n < 0 || n > (h->id == 10 ? 99 : 59))
     return E_INVALIDARG;
   app->fields[h->id - 10] = (int)n;
+  app->resetReels();
   app->draw(app->settings);
   return S_OK;
 }

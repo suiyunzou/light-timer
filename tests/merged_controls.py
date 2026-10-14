@@ -37,25 +37,16 @@ try:
  f=C.oledll.oleacc.AccessibleObjectFromWindow;f.argtypes=[W.HWND,W.DWORD,C.POINTER(comtypes.GUID),C.POINTER(C.POINTER(mod.IAccessible))]
  f(sh,0xfffffffc,C.byref(mod.IAccessible._iid_),C.byref(acc))
  def names():return [acc.accName(i) for i in range(1,acc.accChildCount+1)]
- n=names();assert '呼吸提醒，点击切换到全屏休息' in n and '到时提示音' not in n and '最后五秒呼吸动画' not in n
- assert state()['breath'] and not state()['restMode']
- ImageGrab.grab(tuple(state()['settingsRect'])).save(out/'breathing.png')
- click(34,168);time.sleep(1.3)
- assert state()['restMode'] and not state()['breath']
- assert '全屏休息，点击切换到呼吸提醒' in names()
- click(70,168);assert state()['music'] and state()['musicPreview']
- cmd('close-settings');cmd('settings');time.sleep(.25)
- assert state()['music'] and not state()['musicPlaying']
- ImageGrab.grab(tuple(state()['settingsRect'])).save(out/'fullscreen.png')
- click(34,168);assert state()['breath'] and not state()['restMode']
+ n=names();assert not any('提醒' in item or '提示音' in item or '模式' in item for item in n)
+ click(130,100);assert not state()['restMode'] and not state()['tipVisible']
  cmd('close-settings')
- # Exercise the real tray context menu and its Settings submenu.
+ # Exercise the real tray context menu and its sound submenu.
  u.PostMessageW(h,0x8001,0,0x205);time.sleep(.25)
  menu=u.FindWindowW('#32768',None);assert menu
  hm=u.SendMessageW(menu,0x1e1,0,0);assert hm
- label=C.create_unicode_buffer(80);u.GetMenuStringW(hm,0,label,80,0x400);assert label.value=='设置'
- sub=u.GetSubMenu(hm,0);assert sub
- u.GetMenuStringW(sub,108,label,80,0);assert label.value=='到时提示音'
+ label=C.create_unicode_buffer(80);u.GetMenuStringW(hm,1,label,80,0x400);assert label.value=='提醒'
+ sub=u.GetSubMenu(hm,1);assert sub
+ u.GetMenuStringW(sub,108,label,80,0);assert label.value=='提示音'
  assert not u.GetMenuState(sub,108,0)&8
  def key(k):
   assert u.GetForegroundWindow()==h,'Menu lost foreground; stop keyboard automation'
@@ -66,7 +57,7 @@ try:
   u.SetThreadDpiAwarenessContext(C.c_void_p(-4))
   u.SetCursorPos((rc.left+rc.right)//2,(rc.top+rc.bottom)//2)
   time.sleep(.15);u.mouse_event(2,0,0,0,0);u.mouse_event(4,0,0,0,0);time.sleep(.25)
- menu_click(hm,0)
+ menu_click(hm,1)
  # Capture actual popup windows only.
  rects=[]
  @C.WINFUNCTYPE(W.BOOL,W.HWND,W.LPARAM)
@@ -77,12 +68,12 @@ try:
   return True
  u.EnumWindows(enum,0)
  if rects:ImageGrab.grab((min(x[0] for x in rects),min(x[1] for x in rects),max(x[2] for x in rects),max(x[3] for x in rects))).save(out/'tray-settings.png')
- menu_click(sub,1)
+ menu_click(sub,4)
  time.sleep(.15);assert state()['sound']==1
  k=C.windll.kernel32;k.GetPrivateProfileIntW.argtypes=[W.LPCWSTR,W.LPCWSTR,C.c_int,W.LPCWSTR]
  assert k.GetPrivateProfileIntW('timer','sound',0,str(config))==1
- (out/'result.json').write_text(json.dumps({'checks':['single_slot_two_modes','no_speaker_in_toolbar','music_click_preview','tray_settings_submenu','tray_sound_toggle_saved'],'final':state()},indent=2))
- print('PASS: merged mode slot, music, actual tray Settings menu, sound toggle and persistence')
+ (out/'result.json').write_text(json.dumps({'checks':['reminder_controls_removed','no_speaker_in_toolbar','no_mode_switch_in_settings','tray_sound_submenu','tray_sound_toggle_saved'],'final':state()},indent=2))
+ print('PASS: removed reminder controls, no mode switch in settings, actual tray sound menu, sound toggle and persistence')
 finally:
  if u.FindWindowW('#32768',None):u.keybd_event(27,0,0,0);u.keybd_event(27,0,2,0)
  if h:cmd('quit')

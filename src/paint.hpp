@@ -124,8 +124,22 @@ struct Paint {
                                   : StringAlignmentNear);
     fmt.SetLineAlignment(StringAlignmentCenter);
     fmt.SetFormatFlags(StringFormatFlagsNoWrap);
+    fmt.SetTrimming(StringTrimmingEllipsisCharacter);
     SolidBrush b(c);
     g.DrawString(s.c_str(), (int)s.size(), &font, RectF(x, y, w, h), &fmt, &b);
+  }
+  void reminder(float x, float y, float fullscreen, Color c) {
+    // A miniature reminder scene: the same countdown grows from the corner to the centre.
+    rounded(x - 12, y - 8, 24, 16, 3, c, true);
+    float cx = x + 6 * (1 - fullscreen);
+    float cy = y + 3 * (1 - fullscreen);
+    float radius = 2.5f + 3.f * fullscreen;
+    Pen pen(c, 1.4f);
+    pen.SetStartCap(LineCapRound);
+    pen.SetEndCap(LineCapRound);
+    g.DrawArc(&pen, cx - radius, cy - radius, radius * 2, radius * 2, -90.f, 285.f);
+    line(cx, cy - radius * .5f, cx, cy, c, 1.1f);
+    line(cx, cy, cx + radius * .35f, cy + radius * .2f, c, 1.1f);
   }
   void icon(int id, float x, float y, Color c) {
     switch (id) {
@@ -207,6 +221,19 @@ struct Paint {
         line(x + sx * 8, y + sy * 7, x + sx * 8, y + sy * 2, c);
       }
       break;
+    case 14: {
+      Pen pen(c, 1.5f);
+      pen.SetStartCap(LineCapRound);
+      pen.SetEndCap(LineCapRound);
+      g.DrawArc(&pen, x - 5, y - 7, 10.f, 10.f, 180.f, 180.f);
+      line(x - 5, y - 2, x - 5, y + 2, c, 1.5f);
+      line(x + 5, y - 2, x + 5, y + 2, c, 1.5f);
+      line(x - 5, y + 2, x - 7, y + 5, c, 1.5f);
+      line(x + 5, y + 2, x + 7, y + 5, c, 1.5f);
+      line(x - 7, y + 5, x + 7, y + 5, c, 1.5f);
+      g.DrawArc(&pen, x - 2, y + 5, 4.f, 4.f, 20.f, 140.f);
+      line(x, y - 9, x, y - 7, c, 1.5f);
+    } break;
     }
   }
 };

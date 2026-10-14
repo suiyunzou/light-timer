@@ -53,7 +53,7 @@ for i,value in enumerate(['0','7','13']):
 # Real keyboard input is queued to the focused native window. A second must not steal focus.
 time.sleep(1.1);assert focus()==sh and state()['running']
 u.SetThreadDpiAwarenessContext(C.c_void_p(-4));ImageGrab.grab(tuple(s['settingsRect'])).save(OUT/'input-edited.png')
-click(x+round(252*d),y+round(168*d));s=state();assert s['running'] and not s['settingsVisible'] and 432000<s['remainingMs']<=433000
+click(x+round(252*d),y+round(122*d));s=state();assert s['running'] and not s['settingsVisible'] and 432000<s['remainingMs']<=433000
 result.update(typed_duration_seconds=433,started_remaining_ms=s['remainingMs'],focus_survived_timer_tick=True)
 (OUT/'keyboard-after.json').write_text(json.dumps(result,indent=2),'utf-8');print('PASS real mouse + keyboard: running timer -> custom 00:07:13 -> start',result)
 cmd('start 1500');cmd('toggle')
