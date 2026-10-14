@@ -1,0 +1,4 @@
+# light-timer test-only Python dependencies
+Pillow>=10
+psutil>=5.9
+comtypes>=1.2

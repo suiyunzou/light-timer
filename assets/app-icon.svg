@@ -1,0 +1,9 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="128" height="128" viewBox="0 0 128 128">
+<title>轻计时</title>
+<rect x="7" y="7" width="114" height="114" rx="27" fill="#242424" stroke="#555555" stroke-width="1"/>
+<g fill="none" stroke="#fafafa" stroke-linecap="round" stroke-linejoin="round">
+<path d="M90.046 48.145 A34 34 0 1 1 64 36" stroke-width="8"/>
+<path d="M64 70L80 50" stroke-width="8"/>
+<path d="M64 27V35" stroke-width="6"/>
+<path d="M54 23H74" stroke-width="8"/>
+</g></svg>
