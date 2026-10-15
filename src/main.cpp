@@ -712,11 +712,20 @@ public:
             p.circle(14, 18, 6, p.muted, true, 1.3f);
             p.line(14, 18, 14, 14, p.muted, 1.3f);
             p.line(14, 18, 17, 20, p.muted, 1.3f);
+          } else if (cfg.view == StopwatchView) {
+            p.circle(14, 19, 5.5f, p.muted, true, 1.3f);
+            p.line(12, 10, 16, 10, p.muted, 1.3f);
+            p.line(14, 10, 14, 13, p.muted, 1.3f);
+            p.line(14, 19, 14, 15.5f, p.muted, 1.3f);
           } else {
-            int dy = cfg.view == CountdownView ? 1 : -1;
-            p.line(14, 18 - 6 * dy, 14, 18 + 6 * dy, p.muted, 1.4f);
-            p.line(10, 18 + 2 * dy, 14, 18 + 6 * dy, p.muted, 1.4f);
-            p.line(18, 18 + 2 * dy, 14, 18 + 6 * dy, p.muted, 1.4f);
+            p.line(9.5f, 12, 18.5f, 12, p.muted, 1.3f);
+            p.line(9.5f, 24, 18.5f, 24, p.muted, 1.3f);
+            p.line(10, 12, 10, 14, p.muted, 1.3f);
+            p.line(18, 12, 18, 14, p.muted, 1.3f);
+            p.line(10, 14, 18, 22, p.muted, 1.3f);
+            p.line(18, 14, 10, 22, p.muted, 1.3f);
+            p.line(10, 22, 10, 24, p.muted, 1.3f);
+            p.line(18, 22, 18, 24, p.muted, 1.3f);
           }
           p.line(23, 17, 25, 19, p.muted, 1);
           p.line(25, 19, 27, 17, p.muted, 1);
