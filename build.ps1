@@ -1,5 +1,10 @@
-param([string]$Compiler='D:\ProgramFile\mingw64\bin\g++.exe', [string]$OutputDirectory='')
+param([string]$Compiler='', [string]$OutputDirectory='')
 $ErrorActionPreference='Stop'
+if (!$Compiler) {
+ $command=Get-Command g++.exe -ErrorAction SilentlyContinue
+ if (!$command) { throw 'MinGW-w64 g++.exe was not found. Add it to PATH or specify -Compiler.' }
+ $Compiler=$command.Source
+}
 $outDir=if($OutputDirectory){$OutputDirectory}else{Join-Path $PSScriptRoot 'dist'}
 $objDir=Join-Path $PSScriptRoot 'scratch\build'
 New-Item -ItemType Directory -Force $outDir,$objDir | Out-Null
